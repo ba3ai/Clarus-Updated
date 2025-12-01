@@ -2,7 +2,7 @@
 import React, { useState } from "react";
 import api from "../../services/api";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:5001";
+const API_BASE = import.meta.env.VITE_API_BASE || "https://clarus.azurewebsites.net";
 
 export default function Settings() {
   /* ---------------------- Change password state (YOUR BASE) ---------------------- */

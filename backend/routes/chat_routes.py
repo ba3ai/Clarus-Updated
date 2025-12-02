@@ -34,7 +34,8 @@ from backend.models import (
     DocumentShare,
     Statement,
     User as AppUser,
-    Notification, 
+    Notification,
+    AdminMessage,  # <-- NEW: mailbox table
 )
 
 # ---------------- Snapshot models (string investor fields) ----------------
@@ -986,6 +987,28 @@ def handle_email_admin_intent(
         if any(w in msg_low for w in ["yes", "send", "sure", "ok", "okay", "yep", "go ahead"]):
             subject = state.get("subject") or "Message from investor"
             body_text = state.get("body") or ""
+
+            # NEW: also store this message in the Admin Mailbox table
+            # so it appears in the Admin dashboard mailbox UI.
+            try:
+                investor = None
+                if user.get("investor_id"):
+                    investor = Investor.query.get(user["investor_id"])
+
+                msg_row = AdminMessage(
+                    investor_id=investor.id if investor else None,
+                    investor_name=getattr(investor, "name", None) or user.get("email"),
+                    subject=subject,
+                    body=body_text,
+                )
+                db.session.add(msg_row)
+                db.session.commit()
+            except Exception as exc:
+                current_app.logger.error(
+                    f"Failed to save admin mailbox message: {exc}"
+                )
+
+            # Existing behaviour: actually send the email to the admin
             sent = _send_admin_email(subject, body_text, user)
 
             if sent:
@@ -1002,30 +1025,6 @@ def handle_email_admin_intent(
             meta = {"email_admin": {"stage": "done", "sent": bool(sent)}}
             return {"answer": answer, "context": ctx, "meta": meta}
 
-        # Negative confirmation → cancel
-        if any(w in msg_low for w in ["no", "don't", "do not", "cancel", "stop"]):
-            answer = (
-                f"{_prefix()}okay, I won’t send that email. "
-                "If you’d like to send a different message, just tell me again."
-            )
-            ctx = {"ok": True, "stage": "cancelled"}
-            meta = {"email_admin": {"stage": "cancelled"}}
-            return {"answer": answer, "context": ctx, "meta": meta}
-
-        # Any other reply → ask for clear Yes/No
-        answer = (
-            "Just to confirm, should I send this email to the admin now? "
-            "Please reply with 'Yes' or 'No'."
-        )
-        ctx = {"ok": False, "stage": "confirm_send"}
-        meta = {"email_admin": state}
-        return {"answer": answer, "context": ctx, "meta": meta}
-
-    # Fallback (shouldn't happen)
-    answer = "Something went wrong with the email flow. Please say again that you want to email the admin."
-    ctx = {"ok": False, "stage": "error"}
-    meta = {"email_admin": {"stage": "start"}}
-    return {"answer": answer, "context": ctx, "meta": meta}
 
 
 def handle_dependent_request_intent(

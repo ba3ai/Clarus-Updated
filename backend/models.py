@@ -1238,3 +1238,33 @@ class Notification(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "read_at": self.read_at.isoformat() if self.read_at else None,
         }
+
+
+
+# ------------------ Admin Mailbox Message ------------------
+class AdminMessage(db.Model):
+    __tablename__ = "admin_messages"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    # Investor who sent the message
+    investor_id = db.Column(db.Integer, nullable=True)
+    investor_name = db.Column(db.String(255), nullable=True)
+
+    # Email fields
+    subject = db.Column(db.String(255), nullable=True)
+    body = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    read_at = db.Column(db.DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "investor_id": self.investor_id,
+            "investor_name": self.investor_name,
+            "subject": self.subject,
+            "body": self.body,
+            "created_at": self.created_at.isoformat(),
+            "read_at": self.read_at.isoformat() if self.read_at else None,
+        }

@@ -53,6 +53,7 @@ from backend.routes.admin_investor_routes import (
 
 # ✅ Admin invitations API
 from backend.routes.admin_invites_routes import admin_invites_bp
+from backend.routes.admin_messages_routes import admin_messages_bp
 
 # ✅ NEW: Password reset API (needed for /api/auth/password/*)
 from backend.routes.password_reset_routes import bp as password_reset_bp
@@ -562,6 +563,7 @@ def create_app() -> Flask:
     app.register_blueprint(admin_uc_bp)   # /api/admin/users/*
     app.register_blueprint(admin_invites_bp)   # /api/admin/users/*
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")   # /api/admin/users/*
+    app.register_blueprint(admin_messages_bp)   # /api/admin/messages/*
 
 
     try:

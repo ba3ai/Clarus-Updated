@@ -307,8 +307,6 @@ const AdminDashboard = () => {
     try {
       await api.delete(`/api/invitations/${id}`);
       await Promise.all([loadPendingInvites(), refreshCounts()]);
-      // optional: close dropdown after cancelling invite
-      // setNotifOpen(false);
     } catch (e) {
       alert(e?.response?.data?.error || e?.message || "Cancel failed.");
     }
@@ -369,7 +367,6 @@ const AdminDashboard = () => {
         { ids: [notif.id] }
       );
       await Promise.all([loadDependentRequests(), refreshCounts()]);
-      // close notifications dropdown after approval
       setNotifOpen(false);
     } catch (e) {
       alert(
@@ -416,7 +413,6 @@ const AdminDashboard = () => {
           : "Invitation sent."
       );
 
-      // close notifications dropdown after sending invite
       setNotifOpen(false);
     } catch (e) {
       alert(
@@ -434,7 +430,6 @@ const AdminDashboard = () => {
         { ids: [notif.id] }
       );
       await Promise.all([loadDependentRequests(), refreshCounts()]);
-      // close notifications dropdown after dismiss
       setNotifOpen(false);
     } catch (e) {
       alert(
@@ -499,8 +494,6 @@ const AdminDashboard = () => {
     }
 
     try {
-      // backend should promote requester to group_admin (if needed)
-      // and attach this member (by email) into the InvestorGroupMembership table.
       await api.post("/api/admin/group-requests/approve", {
         notification_id: notif.id,
         member_email: member.email,
@@ -565,6 +558,53 @@ const AdminDashboard = () => {
       );
     }
   };
+
+  // ------------------- Mailbox (merged from 2nd developer) -------------------
+  const [mailOpen, setMailOpen] = useState(false);
+  const [mailUnread, setMailUnread] = useState(0);
+  const [mailList, setMailList] = useState([]);
+  const [mailLoading, setMailLoading] = useState(false);
+
+  const loadUnreadMail = async () => {
+    try {
+      const { data } = await api.get("/api/admin/messages/unread-count");
+      setMailUnread(data.count || 0);
+    } catch {
+      // ignore badge errors
+    }
+  };
+
+  const loadMailbox = async () => {
+    setMailLoading(true);
+    try {
+      const { data } = await api.get("/api/admin/messages");
+      setMailList(Array.isArray(data) ? data : []);
+      await loadUnreadMail();
+    } finally {
+      setMailLoading(false);
+    }
+  };
+
+  const openMailItem = async (msg) => {
+    // Simple viewer: show subject + body
+    alert(
+      `Subject: ${msg.subject || "No subject"}\n\n${
+        msg.body || "No message body"
+      }`
+    );
+    try {
+      await api.post(`/api/admin/messages/${msg.id}/mark-read`);
+      await loadMailbox();
+    } catch {
+      // fail silently
+    }
+  };
+
+  useEffect(() => {
+    loadUnreadMail();
+    const id = setInterval(loadUnreadMail, 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   // ------------------- UI -------------------
   return (
@@ -700,6 +740,7 @@ const AdminDashboard = () => {
       {/* Main Area */}
       <div className="flex-1 flex flex-col">
         <header className="flex justify-end items-center gap-4 p-4 bg-white border-b relative">
+          {/* Notifications */}
           <div className="relative" ref={notifRef}>
             <button
               type="button"
@@ -1109,6 +1150,78 @@ const AdminDashboard = () => {
             )}
           </div>
 
+          {/* Mailbox */}
+          <div className="relative">
+            <button
+              onClick={() => {
+                setMailOpen((open) => {
+                  const next = !open;
+                  if (!open) {
+                    loadMailbox();
+                  }
+                  return next;
+                });
+              }}
+              className="relative inline-flex items-center justify-center rounded-full h-10 w-10 border border-gray-200 bg-white hover:bg-gray-50"
+              title="Mailbox"
+            >
+              <Mail size={18} />
+              {mailUnread > 0 && (
+                <span className="absolute -top-1 -right-1 inline-flex items-center justify-center h-5 min-w-[20px] rounded-full bg-blue-600 text-[10px] text-white px-1">
+                  {mailUnread}
+                </span>
+              )}
+            </button>
+
+            {mailOpen && (
+              <div className="absolute right-0 mt-2 w-[420px] bg-white border rounded-xl shadow-xl z-50">
+                <div className="flex items-center justify-between border-b px-4 py-3">
+                  <div className="font-semibold text-gray-800">Mailbox</div>
+                  <button
+                    className="text-xs rounded-md border px-2 py-0.5 hover:bg-gray-50"
+                    onClick={loadMailbox}
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                <div className="max-h-[60vh] overflow-y-auto px-4 py-3">
+                  {mailLoading ? (
+                    <div className="text-sm text-gray-500 p-3">Loading…</div>
+                  ) : mailList.length === 0 ? (
+                    <div className="text-sm text-gray-500 p-3">
+                      No messages.
+                    </div>
+                  ) : (
+                    <ul className="space-y-2">
+                      {mailList.map((m) => (
+                        <li
+                          key={m.id}
+                          className="border rounded-lg p-3 cursor-pointer hover:bg-gray-50"
+                          onClick={() => openMailItem(m)}
+                        >
+                          <div className="font-medium text-gray-800">
+                            {m.subject || "No subject"}
+                          </div>
+                          <div className="text-gray-500 text-xs">
+                            From: {m.investor_name || "Unknown"} •{" "}
+                            {new Date(m.created_at).toLocaleString()}
+                          </div>
+                          {!m.read_at && (
+                            <span className="text-blue-600 text-xs font-semibold">
+                              Unread
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Avatar */}
           <div className="relative group cursor-pointer">
             <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-lg font-bold">
               {adminData.fullName?.charAt(0).toUpperCase() || "A"}

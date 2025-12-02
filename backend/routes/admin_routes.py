@@ -1,4 +1,4 @@
-# backend/routes/admin_routes.py (merged)
+# backend/routes/admin_routes.py (merged with mailbox)
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from werkzeug.security import generate_password_hash
@@ -12,7 +12,7 @@ from flask import jsonify
 from flask_login import current_user, login_required
 
 from backend.extensions import db
-from backend.models import User, Investor, Record, Invitation
+from backend.models import User, Investor, Record, Invitation, AdminMessage
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -51,7 +51,9 @@ def admin_required(fn):
         if getattr(current_user, "user_type", "").lower() != "admin":
             return jsonify({"msg": "Admins only"}), 403
         return fn(*args, **kwargs)
+
     return wrapper
+
 
 # ─────────────────────── Invite Flow ───────────────────────
 
@@ -61,7 +63,7 @@ def admin_required(fn):
 def invite_user():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
-    name  = (data.get("name") or "").strip()
+    name = (data.get("name") or "").strip()
     user_type = (data.get("user_type") or "investor").strip().lower()
 
     # NEW
@@ -110,7 +112,7 @@ def invite_user():
     db.session.add(inv)
     db.session.commit()
 
-    frontend = current_app.config.get("FRONTEND_URL", "https://clarus.azurewebsites.net")
+    frontend = current_app.config.get("FRONTEND_URL", "http://localhost:5001")
     link = f"{frontend}/invite/accept?token={token}"
     try:
         send_invite_email(email, name, link)
@@ -118,7 +120,6 @@ def invite_user():
         current_app.logger.exception("Failed to send invite email")
 
     return jsonify({"msg": "Invitation created", "token": token}), 201
-
 
 
 # ───────────────── Existing Endpoints (merged & de-duped) ─────────────────
@@ -246,3 +247,55 @@ def get_all_users():
         for user in users
     ]
     return jsonify(user_list), 200
+
+
+# ───────────────────── Admin Mailbox (from 2nd developer) ─────────────────────
+
+# These endpoints back the AdminDashboard mailbox:
+# - GET  /api/admin/messages/unread-count
+# - GET  /api/admin/messages
+# - POST /api/admin/messages/<id>/mark-read
+
+
+@admin_bp.route("/messages/unread-count", methods=["GET"])
+@login_required
+@admin_required
+def admin_messages_unread_count():
+    """
+    Return count of unread admin mailbox messages.
+    """
+    count = AdminMessage.query.filter_by(read_at=None).count()
+    return jsonify({"count": count}), 200
+
+
+@admin_bp.route("/messages", methods=["GET"])
+@login_required
+@admin_required
+def admin_messages_list():
+    """
+    Return all admin mailbox messages, newest first.
+    """
+    # You can add pagination later if needed.
+    msgs = (
+        AdminMessage.query.order_by(AdminMessage.created_at.desc())
+        .all()
+    )
+    return jsonify([m.to_dict() for m in msgs]), 200
+
+
+@admin_bp.route("/messages/<int:message_id>/mark-read", methods=["POST"])
+@login_required
+@admin_required
+def admin_messages_mark_read(message_id: int):
+    """
+    Mark a specific admin mailbox message as read.
+    """
+    msg = AdminMessage.query.get(message_id)
+    if not msg:
+        return jsonify({"msg": "Message not found"}), 404
+
+    if msg.read_at is None:
+        msg.read_at = datetime.utcnow()
+        db.session.commit()
+
+    return jsonify({"msg": "Message marked as read"}), 200

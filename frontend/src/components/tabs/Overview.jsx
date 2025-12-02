@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Sector } from "recharts";
 
 /* ================== Config ================== */
-const API_BASE = import.meta?.env?.VITE_API_BASE || "https://clarus.azurewebsites.net/api";
+const API_BASE = import.meta?.env?.VITE_API_BASE || "http://localhost:5001/api";
 const DEFAULT_SHEET = "bCAS (Q4 Adj)";
 
 /* ================== Helpers ================== */
@@ -463,7 +463,7 @@ export default function Overview() {
     <div className="p-6 bg-white rounded-2xl shadow">
       {/* Header + range */}
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-sm font-semibold text-gray-700">360° Portfolio Overview</h2>
+        <h2 className="text-sm font-semibold text-gray-700">Overview</h2>
 
         <div className="flex items-center gap-3">
           <div className="text-sm text-gray-600">From</div>
@@ -525,11 +525,11 @@ export default function Overview() {
               <div className="text-center">
                 <div className="text-xs text-gray-500">Current value</div>
                 <div className="text-2xl font-semibold text-sky-700">{fmtMoney(currentValue)}</div>
-                {toYM && <div className="text-[11px] text-gray-500 mt-1">as of {toYM}</div>}
+                {/* {toYM && <div className="text-[11px] text-gray-500 mt-1">as of {toYM}</div>} */}
               </div>
             </div>
 
-            <div className="mt-2 text-[11px] text-gray-400">
+            {/* <div className="mt-2 text-[11px] text-gray-400">
               <span>source: {payloadMeta.source}</span>
               <span className="mx-2">•</span>
               <span>basis: {payloadMeta.basis}</span>
@@ -539,7 +539,7 @@ export default function Overview() {
                   <span>period_end: {payloadMeta.period_end}</span>
                 </>
               )}
-            </div>
+            </div> */}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

@@ -533,10 +533,10 @@ function Investors() {
           </button>
         </div>
       </div>
-
+{/* 
       <div className="mb-2 text-sm text-gray-500">
         {source ? `Source: ${source}` : ""}
-      </div>
+      </div> */}
 
       <div className="mb-4 flex gap-3">
         <input

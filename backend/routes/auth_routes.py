@@ -15,6 +15,7 @@ from backend.models import User, Investor, SmsVerification
 from backend.extensions import db
 from backend.services.sms import send_sms
 from backend.models import ActivityLog  # login/logout activity logs
+from backend.utils.activity import log_activity
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
@@ -279,7 +280,7 @@ def login():
     # ⬇⬇ SMS VERIFICATION DISABLED HERE ⬇⬇
     # We skip _needs_sms_verification / _start_sms_challenge
     login_user(user, remember=False)
-
+    _log_activity(user, "login")
     session["user_id"]    = int(user.id)
     session["email"]      = (user.email or "").lower()
     session["user_type"]  = (getattr(user, "user_type", "") or "Investor").lower()
@@ -362,6 +363,7 @@ def logout():
     user = current_user if getattr(current_user, "is_authenticated", False) else None
     try:
         logout_user()
+        _log_activity(user, "logout")
     except Exception:
         pass
     session.clear()

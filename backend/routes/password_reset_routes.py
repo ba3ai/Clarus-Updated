@@ -23,7 +23,7 @@ def _hash(value: str) -> str:
 
 
 def _build_reset_url(token: str) -> str:
-    base = current_app.config.get("APP_BASE_URL", "http://localhost:5001")
+    base = current_app.config.get("APP_BASE_URL", "https://clarus.elpiscapital.com")
     return f"{base}/reset-password?token={token}"
 
 

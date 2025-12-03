@@ -29,7 +29,7 @@ def init_extensions(app: Flask):
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
-    CORS(app, resources={r"/*": {"origins": "http://localhost:5001"}}, supports_credentials=True)
+    CORS(app, resources={r"/*": {"origins": "https://clarus.elpiscapital.com"}}, supports_credentials=True)
 
     # 🔐 attach Flask-Login to this app (this was missing)
     login_manager.init_app(app)

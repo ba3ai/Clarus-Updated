@@ -53,6 +53,16 @@ export default function GroupInvestorAdmin() {
   const [loadingInvestorUsers, setLoadingInvestorUsers] = useState(false);
   const [savingAdmin, setSavingAdmin] = useState(false);
 
+  // NEW: Edit Group Admin settings dialog
+  const [isEditAdminModalOpen, setIsEditAdminModalOpen] = useState(false);
+  const [editAdmin, setEditAdmin] = useState(null);
+  const [editStatus, setEditStatus] = useState("");
+  const [editPermission, setEditPermission] = useState("");
+
+  // NEW: Confirm dialogs instead of window.alert / window.confirm
+  const [confirmDeleteAdmin, setConfirmDeleteAdmin] = useState(null);
+  const [confirmRemoveMember, setConfirmRemoveMember] = useState(null);
+
   // ---------------------------------------------------------------------------
   // Load initial group admin list (from /api/admin/users, then filter)
   // ---------------------------------------------------------------------------
@@ -209,11 +219,9 @@ export default function GroupInvestorAdmin() {
   };
 
   // ---------------------------------------------------------------------------
-  // Remove investor from group
+  // Remove investor from group (no confirm here – modal handles confirm)
   // ---------------------------------------------------------------------------
   const handleRemoveMember = async (adminId, investorId) => {
-    if (!window.confirm("Remove this investor from the group?")) return;
-
     try {
       const res = await xsrfFetch(
         `/api/admin/group-admins/${adminId}/investors/${investorId}`,
@@ -236,11 +244,9 @@ export default function GroupInvestorAdmin() {
   };
 
   // ---------------------------------------------------------------------------
-  // Delete group admin
+  // Delete group admin (no confirm here – modal handles confirm)
   // ---------------------------------------------------------------------------
   const handleDeleteAdmin = async (adminId) => {
-    if (!window.confirm("Delete this Group Investor Admin?")) return;
-
     try {
       const res = await xsrfFetch(
         `/api/admin/group-investor-admin/${adminId}`,
@@ -331,6 +337,67 @@ export default function GroupInvestorAdmin() {
     } catch (err) {
       console.error(err);
       setError(err.message || "Failed to create Group Investor Admin");
+    } finally {
+      setSavingAdmin(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Edit Group Admin settings modal (no alert)
+  // ---------------------------------------------------------------------------
+  const openEditAdminModal = (admin) => {
+    setEditAdmin(admin);
+    setEditStatus(admin.status || "");
+    setEditPermission(admin.permission || "");
+    setIsEditAdminModalOpen(true);
+  };
+
+  const closeEditAdminModal = () => {
+    setIsEditAdminModalOpen(false);
+    setEditAdmin(null);
+    setEditStatus("");
+    setEditPermission("");
+  };
+
+  const handleSaveEditAdmin = async (e) => {
+    e.preventDefault();
+    if (!editAdmin) return;
+
+    setSavingAdmin(true);
+    setError("");
+
+    try {
+      const res = await xsrfFetch(
+        `/api/admin/group-investor-admin/${editAdmin.id}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: editStatus,
+            permission: editPermission,
+          }),
+        }
+      );
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) {
+        throw new Error(
+          data.message ||
+            `Failed to update Group Investor Admin (status ${res.status})`
+        );
+      }
+
+      const updatedUser = data.user || {};
+      setGroupAdmins((prev) =>
+        prev.map((ga) =>
+          ga.id === updatedUser.id ? { ...ga, ...updatedUser } : ga
+        )
+      );
+
+      closeEditAdminModal();
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Failed to update Group Investor Admin");
     } finally {
       setSavingAdmin(false);
     }
@@ -436,11 +503,7 @@ export default function GroupInvestorAdmin() {
 
                             <button
                               type="button"
-                              onClick={() =>
-                                alert(
-                                  "TODO: edit logic for Group Investor Admin"
-                                )
-                              }
+                              onClick={() => openEditAdminModal(admin)}
                               className="inline-flex items-center gap-1 rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
                             >
                               <Edit2 size={14} />
@@ -449,7 +512,7 @@ export default function GroupInvestorAdmin() {
 
                             <button
                               type="button"
-                              onClick={() => handleDeleteAdmin(admin.id)}
+                              onClick={() => setConfirmDeleteAdmin(admin)}
                               className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2 py-1 text-xs text-red-600 hover:bg-red-50"
                             >
                               <Trash2 size={14} />
@@ -485,21 +548,24 @@ export default function GroupInvestorAdmin() {
                                 {members.map((m) => (
                                   <li
                                     key={m.investor_id}
-                                    className="flex items-center justify-between"
+                                    className="flex items-center justify-between pl-4"
                                   >
-                                    <span>
-                                      {m.name || "—"}{" "}
-                                      <span className="text-gray-500">
-                                        ({m.email || "—"})
+                                    <span className="flex items-center gap-1">
+                                      <span className="text-gray-400">↳</span>
+                                      <span>
+                                        {m.name || "—"}{" "}
+                                        <span className="text-gray-500">
+                                          ({m.email || "—"})
+                                        </span>
                                       </span>
                                     </span>
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        handleRemoveMember(
-                                          admin.id,
-                                          m.investor_id
-                                        )
+                                        setConfirmRemoveMember({
+                                          admin,
+                                          member: m,
+                                        })
                                       }
                                       className="text-xs text-red-600 hover:text-red-800"
                                     >
@@ -666,6 +732,187 @@ export default function GroupInvestorAdmin() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Group Investor Admin Modal (no alert) */}
+      {isEditAdminModalOpen && editAdmin && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-md">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h3 className="text-sm font-semibold">
+                Edit Group Investor Admin
+              </h3>
+              <button
+                type="button"
+                onClick={closeEditAdminModal}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditAdmin}>
+              <div className="px-4 py-3 space-y-3 text-sm">
+                <div>
+                  <div className="text-xs font-medium text-gray-500 mb-1">
+                    Name
+                  </div>
+                  <div className="text-gray-800">
+                    {editAdmin.name || "—"}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-xs font-medium text-gray-500 mb-1">
+                    Email
+                  </div>
+                  <div className="text-gray-800">
+                    {editAdmin.email || "—"}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Status
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value)}
+                    placeholder="e.g. Active, Inactive"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Permission
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    value={editPermission}
+                    onChange={(e) => setEditPermission(e.target.value)}
+                    placeholder="e.g. Viewer, Editor, Owner"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+                <button
+                  type="button"
+                  onClick={closeEditAdminModal}
+                  className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingAdmin}
+                  className="inline-flex items-center rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {savingAdmin ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Delete Group Admin Modal */}
+      {confirmDeleteAdmin && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-sm">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h3 className="text-sm font-semibold">Delete Group Admin</h3>
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteAdmin(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-4 py-3 text-sm text-gray-700 space-y-2">
+              <p>
+                Are you sure you want to delete this Group Investor Admin?
+              </p>
+              <p className="font-medium">
+                {confirmDeleteAdmin.name || confirmDeleteAdmin.email}
+              </p>
+              <p className="text-xs text-gray-500">
+                This will demote them back to a regular investor and remove
+                their group memberships.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteAdmin(null)}
+                className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const adminId = confirmDeleteAdmin.id;
+                  await handleDeleteAdmin(adminId);
+                  setConfirmDeleteAdmin(null);
+                }}
+                className="inline-flex items-center rounded-md bg-red-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-red-700"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Remove Member Modal */}
+      {confirmRemoveMember && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-sm">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h3 className="text-sm font-semibold">Remove Investor</h3>
+              <button
+                type="button"
+                onClick={() => setConfirmRemoveMember(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-4 py-3 text-sm text-gray-700 space-y-2">
+              <p>Remove this investor from the group?</p>
+              <p className="font-medium">
+                {confirmRemoveMember.member.name} (
+                {confirmRemoveMember.member.email || "—"})
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setConfirmRemoveMember(null)}
+                className="inline-flex items-center rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const adminId = confirmRemoveMember.admin.id;
+                  const investorId = confirmRemoveMember.member.investor_id;
+                  await handleRemoveMember(adminId, investorId);
+                  setConfirmRemoveMember(null);
+                }}
+                className="inline-flex items-center rounded-md bg-red-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-red-700"
+              >
+                Remove
+              </button>
+            </div>
           </div>
         </div>
       )}

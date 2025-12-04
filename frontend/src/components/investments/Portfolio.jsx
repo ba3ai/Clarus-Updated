@@ -610,43 +610,8 @@ export default function Portfolio() {
 
       {/* Filters + range (your original filters preserved) */}
       <div className="rounded-xl bg-sky-200/60 border border-sky-200 p-3 flex flex-wrap items-center gap-3">
-        <select
-          className="rounded-lg bg-white border border-slate-300 px-3 py-2"
-          value={company}
-          onChange={(e) => setCompany(e.target.value)}
-        >
-          <option>Companies: All</option>
-        </select>
 
-        <span className="text-slate-700">where</span>
-
-        <select
-          className="rounded-lg bg-white border border-slate-300 px-3 py-2"
-          value={industry}
-          onChange={(e) => setIndustry(e.target.value)}
-        >
-          <option>Industries: All</option>
-        </select>
-
-        <select
-          className="rounded-lg bg-white border border-slate-300 px-3 py-2"
-          value={type}
-          onChange={(e) => setType(e.target.value)}
-        >
-          <option>Investment types: All</option>
-          <option>Equity</option>
-          <option>Debt</option>
-        </select>
-
-        <select
-          className="rounded-lg bg-white border border-slate-300 px-3 py-2"
-          value={investor}
-          onChange={(e) => setInvestor(e.target.value)}
-        >
-          <option>Investors: All</option>
-        </select>
-
-        <div className="ml-auto flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <select
             className="rounded-lg bg-white border border-slate-300 px-3 py-2"
             value={pendingFrom}
@@ -692,7 +657,7 @@ export default function Portfolio() {
         <div className="space-y-4">
           <div className="rounded-xl border border-slate-200 bg-white p-5">
             <div className="text-slate-700 mb-3 font-medium">
-              360° Portfolio Overview
+              Overview
             </div>
             <div className="rounded-lg bg-slate-50 border border-slate-200 p-5">
               <div className="flex items-center justify-between">

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { IoClose } from "react-icons/io5";
 import api from "../../services/api"; // use "@/services/api" if you have a Vite alias
 
 /* ---------- tiny utils ---------- */
@@ -11,13 +12,21 @@ const toCurrency = (n) =>
         style: "currency",
         currency: "USD",
       }).format(Number(n));
+
 const toPct = (n, d = 4) =>
   n == null || Number.isNaN(n) ? "—" : `${Number(n).toFixed(d)}%`;
+
 const toISODate = (d) => {
   if (!d) return "";
   const dt = d instanceof Date ? d : new Date(d);
   return Number.isNaN(dt.getTime()) ? "" : dt.toISOString().slice(0, 10);
 };
+
+const getExt = (name = "") => {
+  const m = (name || "").toLowerCase().match(/\.([a-z0-9]+)$/i);
+  return m ? m[1] : "";
+};
+
 function downloadCSV(filename, rows) {
   const csv = rows
     .map((r) =>
@@ -62,6 +71,11 @@ export default function Statements({
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
+  // extra: documents shared as "statement"
+  const [statementDocs, setStatementDocs] = useState([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [docsErr, setDocsErr] = useState("");
+
   // who am I (only to know when auth is ready)
   const [me, setMe] = useState({ ready: false, user: null, investor: null });
 
@@ -79,7 +93,7 @@ export default function Statements({
   const actionsTriggerRef = useRef(null);
   const floatingMenuRef = useRef(null);
 
-  // drawer/detail
+  // drawer/detail for generated statements
   const [detailId, setDetailId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -111,6 +125,13 @@ export default function Statements({
     download: true,
     actions: true,
   });
+
+  // viewer for uploaded statement documents (same style as admin Documents)
+  const [docViewerOpen, setDocViewerOpen] = useState(false);
+  const [docViewerDoc, setDocViewerDoc] = useState(null);
+  const [docViewerUrl, setDocViewerUrl] = useState(null);
+  const [docViewerText, setDocViewerText] = useState(null);
+  const [docViewerLoading, setDocViewerLoading] = useState(false);
 
   /* ---------------- identity (ready flag only) ---------------- */
   useEffect(() => {
@@ -165,11 +186,7 @@ export default function Statements({
         ...(params ? { params } : {}),
       });
 
-      // ⚙️ Robust handling of different response shapes:
-      //  - [ ... ]
-      //  - { items: [...] }
-      //  - { data: [...] }
-      //  - { statements: [...] }
+      // Robust handling of different response shapes
       let list = [];
       if (Array.isArray(data)) {
         list = data;
@@ -187,8 +204,38 @@ export default function Statements({
     }
   }
 
+  // fetch documents shared as "statement"
+  async function fetchStatementDocs() {
+    setDocsLoading(true);
+    setDocsErr("");
+    try {
+      const params = { share_type: "statement" };
+      if (effectiveInvestorId) {
+        params.investor_id = effectiveInvestorId;
+      }
+
+      const { data } = await api.get("/api/documents", { params });
+
+      let list = [];
+      if (Array.isArray(data?.documents)) {
+        list = data.documents;
+      } else if (Array.isArray(data)) {
+        list = data;
+      }
+
+      setStatementDocs(list);
+    } catch (e) {
+      setDocsErr(String(e?.response?.data?.error || e.message || e));
+    } finally {
+      setDocsLoading(false);
+    }
+  }
+
   useEffect(() => {
-    if (me.ready) fetchRows();
+    if (me.ready) {
+      fetchRows();
+      fetchStatementDocs();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [me.ready, effectiveInvestorId, adminView]);
 
@@ -281,7 +328,7 @@ export default function Statements({
     }
   }
 
-  // ---- VIEW LOGIC (blob preview; design unchanged) ----
+  // ---- VIEW LOGIC for generated statements (drawer) ----
   async function openDetail(id) {
     setDetailId(id);
     setDetail(null);
@@ -373,6 +420,59 @@ export default function Statements({
     }
   }
 
+  // ---- VIEW LOGIC for uploaded statement documents (like admin Documents) ----
+  async function openDocViewer(doc) {
+    setDocViewerOpen(true);
+    setDocViewerDoc(doc);
+    setDocViewerUrl(null);
+    setDocViewerText(null);
+    setDocViewerLoading(true);
+
+    try {
+      const res = await api.get(`/api/documents/view/${doc.id}`, {
+        responseType: "blob",
+      });
+      const mime =
+        res.headers["content-type"] ||
+        doc.mime_type ||
+        "application/octet-stream";
+
+      if (
+        mime.startsWith("text/") ||
+        ["csv", "json", "txt", "md"].includes(getExt(doc.original_name))
+      ) {
+        const text = await res.data.text();
+        setDocViewerText(text);
+      } else {
+        const url = URL.createObjectURL(res.data);
+        setDocViewerUrl(url);
+      }
+    } catch (e) {
+      alert("Could not open preview. Try Download.");
+    } finally {
+      setDocViewerLoading(false);
+    }
+  }
+
+  function closeDocViewer() {
+    setDocViewerOpen(false);
+    if (docViewerUrl) {
+      URL.revokeObjectURL(docViewerUrl);
+    }
+    setDocViewerUrl(null);
+    setDocViewerText(null);
+    setDocViewerDoc(null);
+  }
+
+  // cleanup for doc viewer blob URL
+  useEffect(() => {
+    return () => {
+      if (docViewerUrl) {
+        URL.revokeObjectURL(docViewerUrl);
+      }
+    };
+  }, [docViewerUrl]);
+
   // dismiss menus on outside click/scroll/resize
   useEffect(() => {
     const onClick = (e) => {
@@ -407,7 +507,7 @@ export default function Statements({
     <div className="space-y-4">
       {/* Top controls removed intentionally (filters/tabs/quarter/refresh) */}
 
-      {/* Search + actions */}
+      {/* Search + actions + generated statements table */}
       <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
           <input
@@ -875,7 +975,158 @@ export default function Statements({
         </div>
       </div>
 
-      {/* Drawer */}
+      {/* Uploaded statement documents (from /api/documents?share_type=statement) */}
+      <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+          <h3 className="text-sm font-semibold text-slate-800">
+            Uploaded statements (shared files)
+          </h3>
+          {docsLoading && (
+            <span className="text-xs text-slate-500">Loading…</span>
+          )}
+        </div>
+        <div className="px-4 py-3">
+          {docsErr && (
+            <div className="text-sm text-rose-600">{docsErr}</div>
+          )}
+          {!docsErr && !docsLoading && statementDocs.length === 0 && (
+            <div className="text-sm text-slate-500">
+              No uploaded statements have been shared with you yet.
+            </div>
+          )}
+          {!docsErr && statementDocs.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="min-w-full table-fixed text-sm">
+                <thead>
+                  <tr className="text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    <th className="w-[55%] px-2 py-2">Name</th>
+                    <th className="w-[25%] px-2 py-2">Uploaded</th>
+                    <th className="w-[20%] px-2 py-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {statementDocs.map((doc) => (
+                    <tr
+                      key={doc.id}
+                      className="hover:bg-slate-50/60"
+                    >
+                      <td
+                        className="truncate px-2 py-2 font-medium text-slate-800"
+                        title={doc.title || doc.original_name}
+                      >
+                        {doc.title || doc.original_name}
+                      </td>
+                      <td className="px-2 py-2 text-slate-700">
+                        {toISODate(doc.uploaded_at)}
+                      </td>
+                      <td className="px-2 py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+                            onClick={() => openDocViewer(doc)}
+                          >
+                            View
+                          </button>
+                          <a
+                            href={`/api/documents/download/${doc.id}`}
+                            className="inline-flex items-center rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+                          >
+                            Download
+                          </a>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Document viewer modal for uploaded statement files (same style as admin Documents) */}
+      {docViewerOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center"
+          onMouseDown={closeDocViewer}
+        >
+          <div
+            className="bg-white w-[92vw] max-w-5xl max-h-[85vh] rounded-2xl shadow-2xl overflow-hidden"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <div className="font-semibold text-gray-800 truncate">
+                {docViewerDoc?.title || docViewerDoc?.original_name}
+              </div>
+              <div className="flex items-center gap-3">
+                {docViewerDoc && (
+                  <a
+                    className="text-blue-600 hover:underline"
+                    href={`/api/documents/download/${docViewerDoc.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Download
+                  </a>
+                )}
+                <button
+                  className="p-2 rounded hover:bg-slate-100"
+                  onClick={closeDocViewer}
+                  aria-label="Close"
+                >
+                  <IoClose size={18} />
+                </button>
+              </div>
+            </div>
+            <div className="p-0 bg-slate-50 h-[75vh] overflow-hidden">
+              {docViewerLoading && (
+                <div className="h-full grid place-items-center text-sm text-slate-600">
+                  Loading preview…
+                </div>
+              )}
+
+              {!docViewerLoading &&
+                docViewerUrl &&
+                (docViewerDoc?.mime_type || "").includes("pdf") && (
+                  <iframe
+                    title="File preview"
+                    src={docViewerUrl}
+                    className="w-full h-full"
+                  />
+                )}
+
+              {!docViewerLoading &&
+                docViewerUrl &&
+                docViewerDoc &&
+                docViewerDoc.mime_type &&
+                docViewerDoc.mime_type.startsWith("image/") && (
+                  <img
+                    src={docViewerUrl}
+                    alt="preview"
+                    className="max-h-full max-w-full object-contain mx-auto"
+                  />
+                )}
+
+              {!docViewerLoading && docViewerText && (
+                <pre className="h-full overflow-auto p-4 whitespace-pre-wrap text-[13px] leading-5">
+                  {docViewerText}
+                </pre>
+              )}
+
+              {!docViewerLoading &&
+                !docViewerUrl &&
+                !docViewerText && (
+                  <div className="h-full grid place-items-center text-sm text-slate-600">
+                    No preview available. Use Download instead.
+                  </div>
+                )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Drawer for generated statements */}
       {detailId !== null && (
         <div className="fixed inset-0 z-30">
           <div

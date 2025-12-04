@@ -30,7 +30,7 @@ async function xsrfFetch(url, options = {}) {
   });
 }
 
-// Backend route we already implemented: /api/admin/users
+// Backend route: /api/admin/users
 const ADMIN_USERS_API = "/api/admin/users";
 
 export default function AllAdmins() {
@@ -128,7 +128,6 @@ export default function AllAdmins() {
             <tr>
               <th className="px-4 py-2 text-left">Name</th>
               <th className="px-4 py-2 text-left">Email</th>
-              <th className="px-4 py-2 text-left">Bank</th>
               <th className="px-4 py-2 text-left">Status</th>
               <th className="px-4 py-2 text-left">Permission</th>
             </tr>
@@ -136,7 +135,7 @@ export default function AllAdmins() {
           <tbody>
             {paginated.length === 0 ? (
               <tr>
-                <td colSpan="5" className="text-center p-4">
+                <td colSpan="4" className="text-center p-4">
                   No admins found.
                 </td>
               </tr>
@@ -152,7 +151,6 @@ export default function AllAdmins() {
                   >
                     <td className="px-4 py-2">{name || "-"}</td>
                     <td className="px-4 py-2">{u.email || "-"}</td>
-                    <td className="px-4 py-2">{u.bank || "-"}</td>
                     <td className="px-4 py-2">{u.status || "-"}</td>
                     <td className="px-4 py-2">{u.permission || "-"}</td>
                   </tr>

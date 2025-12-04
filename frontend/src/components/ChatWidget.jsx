@@ -397,7 +397,7 @@ export default function ChatWidget({
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
-   function linkify(text) {
+  function linkify(text) {
     let html = escapeHtml(text || "");
 
     // [label](url) – only treat links with "Download" in the label as downloads
@@ -423,7 +423,7 @@ export default function ChatWidget({
     html = html.replace(/\n/g, "<br/>");
     return html;
   }
-
+  
 
   // ---------------------------------------------------------------------
   // Core send logic (shared by normal input and forms)
@@ -441,9 +441,10 @@ export default function ChatWidget({
     setLoading(true);
 
     // quick local greeting
-    const isGreeting = /^(\s*(hi|hello|hey|hola|howdy|yo|good\s+(morning|afternoon|evening))\b[!.]?\s*)$/i.test(
-      trimmed
-    );
+    const isGreeting =
+      /^(\s*(hi|hello|hey|hola|howdy|yo|good\s+(morning|afternoon|evening))\b[!.]?\s*)$/i.test(
+        trimmed
+      );
     if (isGreeting) {
       const displayName =
         (who?.user?.first_name && who.user.first_name.trim()) ||
@@ -661,20 +662,42 @@ export default function ChatWidget({
   // ---------------------------------------------------------------------
   if (hide) return null;
 
-  const Robot = ({ className = "" }) => (
+  // Modern chat-bubble icon (closed state + header)
+// Modern bot icon from your SVG
+const ChatBotIcon = ({ className = "" }) => (
+  <svg
+    viewBox="0 0 20 20"
+    className={className}          // ⬅️ no fixed size here anymore
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    <g transform="translate(-25.414562,-111.28127)">
+      <path
+        d="m 35.412312,115.5918 c -1.442046,0 -2.880739,0.49168 -4.052401,1.4748 -0.705182,0.59173 -1.2502,1.31171 -1.628713,2.10012 -0.05253,-0.005 -0.103652,-0.0164 -0.157588,-0.0164 -0.941869,0 -1.70024,0.75836 -1.70024,1.70021 v 2.10134 c 0,0.94184 0.758371,1.70021 1.70024,1.70021 0.05394,0 0.105059,-0.0117 0.157588,-0.0164 0.06777,0.14047 0.137889,0.27991 0.216918,0.41689 0.308938,0.55139 1.134304,0.0793 0.815588,-0.46655 -1.304955,-2.26029 -0.799571,-5.12447 1.199708,-6.80208 1.999326,-1.67765 4.903352,-1.67765 6.902655,0 1.999326,1.67761 2.50471,4.54174 1.199732,6.80208 l -0.01407,0.0234 -0.0094,0.0234 c 0,0 -0.633799,1.40211 -1.878344,1.40211 l -1.575387,-0.0141 c -0.147739,-0.21575 -0.384191,-0.366 -0.666512,-0.366 h -1.015533 c -0.45534,0 -0.821638,0.36752 -0.821638,0.82286 0,0.28087 0.178225,0.49415 0.586056,0.49415 l 3.493009,2.8e-4 c 1.867604,0 2.675336,-1.8335 2.712107,-1.91835 v -0.005 c 0.07832,-0.13578 0.147269,-0.27521 0.214572,-0.41444 0.05488,0.005 0.108342,0.0164 0.164858,0.0164 0.941869,0 1.700237,-0.75836 1.700237,-1.70021 v -2.10134 c 0,-0.94184 -0.75837,-1.70021 -1.700237,-1.70021 -0.05441,0 -0.105762,0.009 -0.158761,0.0164 -0.377627,-0.78846 -0.921023,-1.50837 -1.6263,-2.10014 -1.171614,-0.98312 -2.616355,-1.47481 -4.058451,-1.47481 z m -2.049205,2.98718 c -0.366019,-0.0239 -0.700354,0.0535 -0.992502,0.36114 -0.779049,0.82018 -1.260325,1.9365 -1.260325,3.12533 0,0.98061 0.327722,2.07941 0.879793,2.11951 0.786511,0.0572 2.027657,-0.45928 3.424676,-0.45928 1.480437,0 2.786843,0.57951 3.561606,0.44232 0.469528,-0.083 0.744064,-1.20536 0.744064,-2.10255 0,-1.18883 -0.482452,-2.30515 -1.261524,-3.12533 -0.779054,-0.82021 -1.855342,0 -3.044146,0 -0.743006,0 -1.441646,-0.32109 -2.051642,-0.36114 z m -0.174473,2.02134 c 0.434305,1.7e-4 0.786345,0.35219 0.786486,0.78651 -1.41e-4,0.43431 -0.352181,0.78633 -0.786486,0.78649 -0.434304,-1.6e-4 -0.786345,-0.35218 -0.786485,-0.78649 1.4e-4,-0.43432 0.352181,-0.78634 0.786485,-0.78651 z m 4.452304,0 c 0.434329,1.7e-4 0.786345,0.35219 0.786509,0.78651 -1.66e-4,0.43431 -0.35218,0.78633 -0.786509,0.78649 -0.434304,-1.6e-4 -0.786321,-0.35218 -0.786485,-0.78649 1.64e-4,-0.43432 0.352181,-0.78634 0.786485,-0.78651 z"
+        fill="currentColor"
+        fillRule="evenodd"
+      />
+    </g>
+  </svg>
+);
+
+
+
+  // Close (X) icon when chat is open
+  const CloseIcon = ({ className = "" }) => (
     <svg viewBox="0 0 24 24" className={`h-5 w-5 ${className}`}>
       <path
-        fill="currentColor"
-        d="M12 2a1 1 0 0 1 1 1v1.06A7.002 7.002 0 0 1 19 11v4a3 3 0 0 1-3 3h-1a3 3 0 0 1-6 0H8a3 3 0 0 1-3-3v-4a7.002 7.002 0 0 1 6-6.94V3a1 1 0 0 1 1-1Zm-3 9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2H9Z"
+        d="M6 6l12 12M18 6L6 18"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
       />
     </svg>
   );
+
   const MicIcon = ({ active }) => (
     <svg
       viewBox="0 0 24 24"
-      className={`h-5 w-5 ${
-        active ? "text-rose-600" : ""
-      }`}
+      className={`h-5 w-5 ${active ? "text-rose-600" : ""}`}
     >
       <path
         fill="currentColor"
@@ -685,12 +708,17 @@ export default function ChatWidget({
 
   return (
     <div className="fixed bottom-6 right-6 z-50">
+      {/* Floating round toggle button */}
       <button
         onClick={() => setOpen(!open)}
         className="group rounded-full shadow-2xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white h-14 w-14 flex items-center justify-center hover:from-violet-500 hover:to-indigo-500 transition transform hover:scale-[1.03]"
-        aria-label="Open financial chatbot"
+        aria-label={open ? "Close chatbot" : "Open financial chatbot"}
       >
-        <Robot className="text-white group-hover:scale-110 transition-transform" />
+        {open ? (
+          <CloseIcon className="group-hover:rotate-90 transition-transform" />
+        ) : (
+          <ChatBotIcon className="h-10 w-10 group-hover:scale-110 transition-transform" />
+        )}
       </button>
 
       {open && (
@@ -700,7 +728,7 @@ export default function ChatWidget({
             <div className="absolute inset-0 px-4 flex items-center justify-between">
               <div className="flex items-center gap-3 text-white">
                 <div className="h-9 w-9 rounded-xl bg-white/20 flex items-center justify-center ring-1 ring-white/30">
-                  <Robot className="text-white" />
+                  <ChatBotIcon className="h-6 w-6 text-white" />
                 </div>
                 <div className="leading-tight">
                   <div className="font-semibold text-[15px]">
@@ -716,9 +744,7 @@ export default function ChatWidget({
                 type="button"
                 onClick={() => setTtsEnabled(!ttsEnabled)}
                 className="text-white/90 hover:text-white bg-white/10 hover:bg-white/15 border border-white/20 rounded-xl px-3 py-1.5 text-xs"
-                title={
-                  ttsEnabled ? "Turn voice off" : "Turn voice on"
-                }
+                title={ttsEnabled ? "Turn voice off" : "Turn voice on"}
               >
                 {ttsEnabled ? "Voice On" : "Voice Off"}
               </button>

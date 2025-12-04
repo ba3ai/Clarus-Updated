@@ -27,7 +27,7 @@ import {
 
 import Settings from "./tabs/Settings";
 import AddUser from "./tabs/AddUser";
-import AllUsers from "./tabs/AllUsers";
+import AllAdmins from "./tabs/AllAdmins";
 import ExcelSheet from "./tabs/ExcelSheet";
 import QuickBooks from "./tabs/QuickBooks";
 import ManualEntry from "./tabs/ManualEntry";
@@ -91,8 +91,8 @@ const AdminDashboard = () => {
         return <Settings />;
       case "addUser":
         return <AddUser />;
-      case "allUsers":
-        return <AllUsers />;
+      case "AllAdmins":
+        return <AllAdmins />;
       case "excel":
         return <ExcelSheet />;
       case "quickbooks":
@@ -667,7 +667,7 @@ const AdminDashboard = () => {
               />
               <TabButton
                 label="All Users"
-                tabKey="allUsers"
+                tabKey="AllAdmins"
                 icon={<Users size={16} />}
               />
             </div>
@@ -688,7 +688,7 @@ const AdminDashboard = () => {
               />
             </div>
 
-            <div>
+            {/* <div>
               <h3 className="text-base font-bold text-gray-500 uppercase mb-2">
                 Manual Entry
               </h3>
@@ -697,9 +697,9 @@ const AdminDashboard = () => {
                 tabKey="manual"
                 icon={<Keyboard size={16} />}
               />
-            </div>
+            </div> */}
 
-            <div>
+            {/* <div>
               <h3 className="text-base font-bold text-gray-500 uppercase mb-2">
                 Funds
               </h3>
@@ -721,7 +721,7 @@ const AdminDashboard = () => {
                 <BarChart2 size={16} />
                 General Partner
               </a>
-            </div>
+            </div> */}
           </nav>
         </div>
 

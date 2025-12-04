@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useContext, useMemo } from "react";
+import React, {
+  useState,
+  useEffect,
+  useContext,
+  useMemo,
+  useRef,
+} from "react";
 import { AuthContext } from "../context/AuthContext";
 import api from "../services/api";
 
@@ -160,10 +166,8 @@ export default function InvestorDashboard() {
 
   const [open, setOpen] = useState(true);
 
-  const initialTab =
-    (typeof window !== "undefined" &&
-      localStorage.getItem("investor.selectedTab")) || "accreditation";
-  const [selected, setSelected] = useState(initialTab);
+  // Start from "accreditation" until we know their accreditation status
+  const [selected, setSelected] = useState("accreditation");
 
   const [accredited, setAccredited] = useState(null);
   const [accError, setAccError] = useState("");
@@ -192,6 +196,30 @@ export default function InvestorDashboard() {
   const [notifLoading, setNotifLoading] = useState(false);
   const [notifError, setNotifError] = useState("");
 
+  // ---- profile popover (like admin) ----
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileRef = useRef(null);
+  const userInitial = (
+    (user?.full_name || user?.email || "?").trim()[0] || "?"
+  ).toUpperCase();
+  const userTypeLabel = (user?.user_type || "investor").toString();
+
+  // close profile popover on outside click
+  useEffect(() => {
+    const handler = (e) => {
+      if (
+        profileRef.current &&
+        !profileRef.current.contains(e.target)
+      ) {
+        setProfileOpen(false);
+      }
+    };
+    if (profileOpen) {
+      document.addEventListener("mousedown", handler);
+    }
+    return () => document.removeEventListener("mousedown", handler);
+  }, [profileOpen]);
+
   // accreditation check
   useEffect(() => {
     let alive = true;
@@ -204,11 +232,9 @@ export default function InvestorDashboard() {
         if (!alive) return;
         const ok = !!(data && data.selection && data.selection !== "not_yet");
         setAccredited(ok);
-        setSelected(
-          ok
-            ? localStorage.getItem("investor.selectedTab") || "overview"
-            : "accreditation"
-        );
+        // If accredited already, always land on Overview after login.
+        // Otherwise, force the Accreditation tab.
+        setSelected(ok ? "overview" : "accreditation");
       } catch (e) {
         if (!alive) return;
         setAccredited(false);
@@ -289,22 +315,6 @@ export default function InvestorDashboard() {
       delete api.defaults.headers.common["X-View-As-Investor"];
     };
   }, [metaReady, isDependent, invMeta.parent_investor_id, selected]);
-
-  // fix stored tab for dependents
-  useEffect(() => {
-    if (!metaReady) return;
-    if (isDependent) {
-      const stored = localStorage.getItem("investor.selectedTab");
-      if (stored && stored !== "portfolio")
-        localStorage.removeItem("investor.selectedTab");
-    }
-  }, [metaReady, isDependent]);
-
-  useEffect(() => {
-    if (selected === "accreditation" || accredited === true) {
-      localStorage.setItem("investor.selectedTab", selected);
-    }
-  }, [selected, accredited]);
 
   // ---- Group admin: set/clear child view context when a member is chosen in My Group ----
   const handleSelectGroupInvestor = (member) => {
@@ -523,8 +533,7 @@ export default function InvestorDashboard() {
 
     setSelected(id);
 
-    // 🔑 IMPORTANT: if we are leaving the My Group area, clear any
-    // child-investor context so main dashboard tabs show only the group admin.
+    // If we are leaving the My Group area, clear any child-investor context
     if (id !== "group-members") {
       try {
         localStorage.removeItem("investorHint");
@@ -574,8 +583,9 @@ export default function InvestorDashboard() {
           </h1>
         </div>
 
-        {/* Notification bell */}
+        {/* Notification bell + profile avatar */}
         <div className="flex items-center gap-3">
+          {/* Notifications */}
           <div className="relative">
             <button
               type="button"
@@ -654,6 +664,41 @@ export default function InvestorDashboard() {
                       </div>
                     ))
                   )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Profile avatar & info popover */}
+          <div className="relative" ref={profileRef}>
+            <button
+              type="button"
+              onClick={() => setProfileOpen((v) => !v)}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 text-white text-sm font-semibold shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              aria-label="Account info"
+            >
+              {userInitial}
+            </button>
+            {profileOpen && (
+              <div className="absolute right-0 mt-2 w-64 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg z-[110]">
+                <div className="mb-1 font-semibold text-slate-800">
+                  {`${userTypeLabel[0]?.toUpperCase() || ""}${userTypeLabel
+                    .slice(1)
+                    .toLowerCase()} Info`}
+                </div>
+                <div className="space-y-1 text-slate-700">
+                  <div>
+                    <span className="font-semibold">Full Name: </span>
+                    <span>{user?.full_name || "—"}</span>
+                  </div>
+                  <div>
+                    <span className="font-semibold">Email: </span>
+                    <span>{user?.email || "—"}</span>
+                  </div>
+                  <div>
+                    <span className="font-semibold">User Type: </span>
+                    <span>{userTypeLabel || "investor"}</span>
+                  </div>
                 </div>
               </div>
             )}

@@ -927,6 +927,40 @@ class MarketPrice(db.Model):
 
 
 # --- Documents (admin uploads shared to investors) ---
+class DocumentFolder(db.Model):
+    __tablename__ = "document_folders"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    created_by_user_id = db.Column(
+        db.Integer, db.ForeignKey("user.id"), nullable=False
+    )
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+    parent_id = db.Column(
+    db.Integer,
+    db.ForeignKey("document_folders.id"),
+    nullable=True,
+    )
+
+
+        
+    # optional convenience relationship
+    parent = db.relationship(
+        "DocumentFolder",
+        remote_side="DocumentFolder.id",
+        backref=db.backref("children", lazy="dynamic"),
+    )
+
+    # documents backref is defined on Document.folder relationship below
+    shares = db.relationship(
+        "DocumentFolderShare",
+        backref="folder",
+        cascade="all,delete-orphan",
+    )
+
+
 class Document(db.Model):
     __tablename__ = "documents"
 
@@ -936,25 +970,89 @@ class Document(db.Model):
     stored_name = db.Column(db.String(255), nullable=False, unique=True)
     mime_type = db.Column(db.String(128))
     size_bytes = db.Column(db.Integer)
-    # NOTE: FK points to 'user.id' (singular), matching the User table name
-    uploaded_by_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+
+    # which admin created it
+    uploaded_by_user_id = db.Column(
+        db.Integer, db.ForeignKey("user.id"), nullable=False
+    )
     uploaded_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    shares = db.relationship("DocumentShare", backref="document", cascade="all,delete-orphan")
+    # NEW: optional folder
+    folder_id = db.Column(
+        db.Integer,
+        db.ForeignKey("document_folders.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    folder = db.relationship(
+        "DocumentFolder",
+        backref=db.backref("documents", cascade="all,delete-orphan"),
+    )
+
+    shares = db.relationship(
+        "DocumentShare",
+        backref="document",
+        cascade="all,delete-orphan",
+    )
 
 
 class DocumentShare(db.Model):
     __tablename__ = "document_shares"
 
     id = db.Column(db.Integer, primary_key=True)
-    document_id = db.Column(db.Integer, db.ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    # NOTE: also singular 'user.id'
-    investor_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    document_id = db.Column(
+        db.Integer,
+        db.ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    investor_user_id = db.Column(
+        db.Integer, db.ForeignKey("user.id"), nullable=False
+    )
+
+    # NEW: where the investor should see this file
+    # "document"  -> Investor Documents section
+    # "statement" -> Investor Statements section/tab
+    share_type = db.Column(
+        db.String(32),
+        nullable=False,
+        default="document",
+        server_default="document",
+        index=True,
+    )
+
     shared_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     __table_args__ = (
-        db.UniqueConstraint("document_id", "investor_user_id", name="uq_doc_investor"),
+        db.UniqueConstraint(
+            "document_id",
+            "investor_user_id",
+            name="uq_doc_investor",
+        ),
     )
+
+
+class DocumentFolderShare(db.Model):
+    __tablename__ = "document_folder_shares"
+
+    id = db.Column(db.Integer, primary_key=True)
+    folder_id = db.Column(
+        db.Integer,
+        db.ForeignKey("document_folders.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    investor_user_id = db.Column(
+        db.Integer, db.ForeignKey("user.id"), nullable=False
+    )
+    shared_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "folder_id",
+            "investor_user_id",
+            name="uq_folder_investor",
+        ),
+    )
+
 
 
 class Statement(db.Model):

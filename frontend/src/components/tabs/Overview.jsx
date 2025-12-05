@@ -37,6 +37,24 @@ const fmtPctSign = (v) => {
   return n == null ? "—" : `${n >= 0 ? "+ " : "- "}${Math.abs(n).toFixed(2)}%`;
 };
 
+/** color helpers for KPI text */
+const kpiPctColor = (v) => {
+  const n = toNum(v);
+  if (n == null) return "text-gray-800";
+  if (n > 0) return "text-emerald-600";
+  if (n < 0) return "text-red-600";
+  return "text-gray-800";
+};
+
+// For MOIC, treat >1x as positive (green), <1x as negative (red)
+const kpiMoicColor = (v) => {
+  const n = toNum(v);
+  if (n == null) return "text-gray-800";
+  if (n > 1) return "text-emerald-600";
+  if (n < 1) return "text-red-600";
+  return "text-gray-800";
+};
+
 const ym = (d) => String(d).slice(0, 7); // YYYY-MM
 const monthsBetween = (d0, d1) => {
   const a = new Date(d0);
@@ -214,9 +232,13 @@ function UsersPanel() {
               <th className="px-4 py-2 text-left font-medium text-gray-600">Name</th>
               <th className="px-4 py-2 text-left font-medium text-gray-600">Email</th>
               <th className="px-4 py-2 text-left font-medium text-gray-600">Type</th>
-              <th className="px-4 py-2 text-left font-medium text-gray-600">Organization</th>
+              <th className="px-4 py-2 text-left font-medium text-gray-600">
+                Organization
+              </th>
               <th className="px-4 py-2 text-left font-medium text-gray-600">Status</th>
-              <th className="px-4 py-2 text-left font-medium text-gray-600">Permission</th>
+              <th className="px-4 py-2 text-left font-medium text-gray-600">
+                Permission
+              </th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-100">
@@ -254,7 +276,6 @@ function StatCard({ label, value, sub }) {
     </div>
   );
 }
-
 
 /* ================== Main Overview (synced donuts & KPIs) ================== */
 export default function Overview() {
@@ -467,7 +488,11 @@ export default function Overview() {
 
         <div className="flex items-center gap-3">
           <div className="text-sm text-gray-600">From</div>
-          <select className="border rounded px-2 py-1 text-sm" value={fromYM} onChange={(e) => setFromYM(e.target.value)}>
+          <select
+            className="border rounded px-2 py-1 text-sm"
+            value={fromYM}
+            onChange={(e) => setFromYM(e.target.value)}
+          >
             {months.map((m) => (
               <option key={m} value={m}>
                 {m}
@@ -476,7 +501,11 @@ export default function Overview() {
           </select>
 
           <div className="text-sm text-gray-600">to</div>
-          <select className="border rounded px-2 py-1 text-sm" value={toYM} onChange={(e) => setToYM(e.target.value)}>
+          <select
+            className="border rounded px-2 py-1 text-sm"
+            value={toYM}
+            onChange={(e) => setToYM(e.target.value)}
+          >
             {months.map((m) => (
               <option key={m} value={m}>
                 {m}
@@ -519,43 +548,42 @@ export default function Overview() {
             <div className="grid grid-cols-1 sm:grid-cols-3 items-center gap-4">
               <div className="text-center">
                 <div className="text-xs text-gray-500">Initial value</div>
-                <div className="text-2xl font-semibold text-sky-700">{fmtMoney(initialValue)}</div>
+                <div className="text-2xl font-semibold text-sky-700">
+                  {fmtMoney(initialValue)}
+                </div>
               </div>
               <div className="text-center text-2xl text-gray-400">→</div>
               <div className="text-center">
                 <div className="text-xs text-gray-500">Current value</div>
-                <div className="text-2xl font-semibold text-sky-700">{fmtMoney(currentValue)}</div>
-                {/* {toYM && <div className="text-[11px] text-gray-500 mt-1">as of {toYM}</div>} */}
+                <div className="text-2xl font-semibold text-sky-700">
+                  {fmtMoney(currentValue)}
+                </div>
               </div>
             </div>
-
-            {/* <div className="mt-2 text-[11px] text-gray-400">
-              <span>source: {payloadMeta.source}</span>
-              <span className="mx-2">•</span>
-              <span>basis: {payloadMeta.basis}</span>
-              {payloadMeta.period_end && (
-                <>
-                  <span className="mx-2">•</span>
-                  <span>period_end: {payloadMeta.period_end}</span>
-                </>
-              )}
-            </div> */}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="rounded-xl border border-gray-200 p-4">
               <div className="text-xs text-gray-500">ROI</div>
-              <div className="mt-2 text-lg font-semibold text-gray-800">{fmtPctSign(roiPct)}</div>
+              <div
+                className={`mt-2 text-lg font-semibold ${kpiPctColor(roiPct)}`}
+              >
+                {fmtPctSign(roiPct)}
+              </div>
             </div>
             <div className="rounded-xl border border-gray-200 p-4">
               <div className="text-xs text-gray-500">MOIC</div>
-              <div className="mt-2 text-lg font-semibold text-gray-800">
+              <div
+                className={`mt-2 text-lg font-semibold ${kpiMoicColor(moic)}`}
+              >
                 {toNum(moic) == null ? "—" : `${toNum(moic).toFixed(2)}x`}
               </div>
             </div>
             <div className="rounded-xl border border-gray-200 p-4">
               <div className="text-xs text-gray-500">IRR (annualized)</div>
-              <div className="mt-2 text-lg font-semibold text-gray-800">
+              <div
+                className={`mt-2 text-lg font-semibold ${kpiPctColor(irrPct)}`}
+              >
                 {irrPct == null ? "—" : fmtPctSign(irrPct)}
               </div>
             </div>
@@ -568,26 +596,12 @@ export default function Overview() {
             <button
               onClick={() => setTab("portfolio")}
               className={`pb-2 -mb-px ${
-                tab === "portfolio" ? "text-sky-700 border-b-2 border-sky-600 font-medium" : "text-gray-500 hover:text-gray-700"
+                tab === "portfolio"
+                  ? "text-sky-700 border-b-2 border-sky-600 font-medium"
+                  : "text-gray-500 hover:text-gray-700"
               }`}
             >
               Portfolio Allocation
-            </button>
-            <button
-              onClick={() => setTab("industry")}
-              className={`pb-2 -mb-px ${
-                tab === "industry" ? "text-sky-700 border-b-2 border-sky-600 font-medium" : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              Industry Allocation
-            </button>
-            <button
-              onClick={() => setTab("top")}
-              className={`pb-2 -mb-px ${
-                tab === "top" ? "text-sky-700 border-b-2 border-sky-600 font-medium" : "text-gray-500 hover:text-gray-700"
-              }`}
-            >
-              Top Performers
             </button>
           </div>
 
@@ -598,17 +612,23 @@ export default function Overview() {
             <div>
               <Donut data={allocInit.items} title="Initial Value" total={allocInit.total} />
               {fromYM && (
-                <div className="text-center text-[11px] text-gray-500 -mt-1">as of {fromYM}</div>
+                <div className="text-center text-[11px] text-gray-500 -mt-1">
+                  as of {fromYM}
+                </div>
               )}
             </div>
 
-            <div className="hidden sm:flex items-center justify-center text-2xl text-gray-400">→</div>
+            <div className="hidden sm:flex items-center justify-center text-2xl text-gray-400">
+              →
+            </div>
 
             {/* Current donut (to month) */}
             <div>
               <Donut data={allocCurr.items} title="Current Value" total={allocCurr.total} />
               {toYM && (
-                <div className="text-center text-[11px] text-gray-500 -mt-1">as of {toYM}</div>
+                <div className="text-center text-[11px] text-gray-500 -mt-1">
+                  as of {toYM}
+                </div>
               )}
             </div>
           </div>

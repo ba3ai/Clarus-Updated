@@ -9,6 +9,7 @@ from sqlalchemy import func
 
 from backend.extensions import db
 from backend.models import User, Investor, InvestorGroupMembership, Notification
+from backend.services.notifier import create_investor_notification
 import re
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,35 @@ def delete_group_investor_admin(user_id: int):
     return jsonify({"ok": True, "message": "Group Investor Admin removed"}), 200
 
 
+
+@bp.patch("/group-investor-admin/<int:user_id>")
+@login_required
+def update_group_investor_admin(user_id: int):
+    """
+    Update basic settings for a Group Investor Admin user (status, permission).
+    Used by the GroupInvestorAdmin tab Edit dialog.
+    """
+    if not _is_admin():
+        return jsonify({"ok": False, "message": "Admins only"}), 403
+
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"ok": False, "message": "User not found"}), 404
+
+    ut_raw = (user.user_type or "").strip().lower().replace(" ", "")
+    if "groupadmin" not in ut_raw:
+        return jsonify({"ok": False, "message": "User is not a Group Investor Admin"}), 400
+
+    data = request.get_json(silent=True) or {}
+    if "status" in data:
+        user.status = (data.get("status") or "").strip() or None
+    if "permission" in data:
+        user.permission = (data.get("permission") or "").strip() or None
+
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify({"ok": True, "user": _user_row(user)}), 200
 # ---------------------------------------------------------------------------
 # 4) List members (Investors) of a particular group admin (ADMIN view)
 #    GET /api/admin/group-admins/<admin_id>/investors
@@ -414,6 +444,22 @@ def approve_group_request():
             ),
             404,
         )
+    
+        # Investor-facing bell notification: group request APPROVED
+    approval_msg = "Your group account request has been approved."
+    if added:
+        approval_msg += f" {added} investor(s) were added to your group."
+
+    create_investor_notification(
+        investor_id=parent_inv.id,
+        kind="group_request_approved",
+        title="Group account request approved",
+        message=approval_msg,
+    )
+
+    # commit everything: memberships, read flag, and the new notification
+    db.session.commit()
+
 
     # Mark the notification as read/handled
     notif.is_read = True
@@ -659,3 +705,62 @@ def approve_group_request():
             "links_created": created_links,
         }
     )
+
+
+
+@bp.post("/group-requests/reject")
+@login_required
+def reject_group_request():
+    if not _is_admin():
+        return jsonify({"ok": False, "message": "Admins only"}), 403
+
+    data = request.get_json(silent=True) or {}
+    notif_id = data.get("notification_id")
+    parent_investor_id = data.get("parent_investor_id")
+    reason = (data.get("reason") or "").strip()
+
+    if not notif_id:
+        return jsonify({"ok": False, "message": "notification_id is required"}), 400
+
+    try:
+        notif_id_int = int(notif_id)
+    except (TypeError, ValueError):
+        return jsonify(
+            {"ok": False, "message": "notification_id must be an integer"}
+        ), 400
+
+    notif = db.session.get(Notification, notif_id_int)
+    if not notif:
+        return jsonify({"ok": False, "message": "Notification not found"}), 404
+
+    if not parent_investor_id:
+        parent_investor_id = notif.investor_id
+
+    try:
+        parent_investor_id_int = int(parent_investor_id)
+    except (TypeError, ValueError):
+        return jsonify(
+            {"ok": False, "message": "parent_investor_id must be an integer"}
+        ), 400
+
+    parent_inv = db.session.get(Investor, parent_investor_id_int)
+    if not parent_inv:
+        return jsonify({"ok": False, "message": "Parent investor not found"}), 404
+
+    # Mark the admin-side request notification as handled
+    notif.is_read = True
+    if hasattr(notif, "read_at"):
+        notif.read_at = datetime.utcnow()
+    db.session.add(notif)
+
+    # Investor-facing bell notification: group request REJECTED
+    msg = reason or "Your group account request has been rejected by the administrator."
+    create_investor_notification(
+        investor_id=parent_inv.id,
+        kind="group_request_rejected",
+        title="Group account request rejected",
+        message=msg,
+    )
+
+    db.session.commit()
+    return jsonify({"ok": True}), 200

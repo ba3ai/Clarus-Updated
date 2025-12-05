@@ -195,6 +195,7 @@ export default function InvestorDashboard() {
   const [notifItems, setNotifItems] = useState([]);
   const [notifLoading, setNotifLoading] = useState(false);
   const [notifError, setNotifError] = useState("");
+  const notifRef = useRef(null);
 
   // ---- profile popover (like admin) ----
   const [profileOpen, setProfileOpen] = useState(false);
@@ -586,7 +587,7 @@ export default function InvestorDashboard() {
         {/* Notification bell + profile avatar */}
         <div className="flex items-center gap-3">
           {/* Notifications */}
-          <div className="relative">
+          <div className="relative" ref={notifRef}>
             <button
               type="button"
               onClick={toggleNotif}
@@ -602,70 +603,79 @@ export default function InvestorDashboard() {
             </button>
 
             {notifOpen && (
-              <div className="absolute right-0 mt-2 w-72 rounded-xl border border-slate-200 bg-white shadow-lg z-[100]">
-                <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
-                  <span className="text-xs font-semibold text-slate-600">
-                    Notifications
-                  </span>
-                  <button
-                    type="button"
-                    onClick={markAllNotifRead}
-                    className="text-[11px] text-sky-600 hover:underline"
-                  >
-                    Mark all read
-                  </button>
-                </div>
-                <div className="max-h-72 overflow-y-auto">
-                  {notifLoading ? (
-                    <div className="px-3 py-3 text-xs text-slate-500">
-                      Loading…
-                    </div>
-                  ) : notifError ? (
-                    <div className="px-3 py-3 text-xs text-rose-600">
-                      {notifError}
-                    </div>
-                  ) : !notifItems.length ? (
-                    <div className="px-3 py-3 text-xs text-slate-500">
-                      No notifications yet.
-                    </div>
-                  ) : (
-                    notifItems.map((n) => (
-                      <div
-                        key={n.id}
-                        className={`px-3 py-2 text-xs border-b border-slate-50 last:border-0 ${
-                          !n.read_at ? "bg-slate-50" : ""
-                        }`}
-                      >
-                        <div className="font-semibold text-slate-700">
-                          {n.title || "Notification"}
-                        </div>
-                        {n.message && (
-                          <div className="mt-0.5 text-slate-600">
-                            {n.message}
-                          </div>
-                        )}
-                        <div className="mt-0.5 flex justify-between items-center text-[10px] text-slate-400">
-                          <span>
-                            {n.created_at
-                              ? new Date(n.created_at).toLocaleString()
-                              : ""}
-                          </span>
-                          {n.link_url && (
-                            <a
-                              href={n.link_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-sky-600 hover:underline"
-                            >
-                              View
-                            </a>
-                          )}
-                        </div>
+              <>
+                {/* full-screen transparent overlay – click to close */}
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setNotifOpen(false)}
+                />
+
+                {/* dropdown panel */}
+                <div className="absolute right-0 mt-2 w-72 rounded-xl border border-slate-200 bg-white shadow-lg z-50">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100">
+                    <span className="text-xs font-semibold text-slate-600">
+                      Notifications
+                    </span>
+                    <button
+                      type="button"
+                      onClick={markAllNotifRead}
+                      className="text-[11px] text-sky-600 hover:underline"
+                    >
+                      Mark all read
+                    </button>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto">
+                    {notifLoading ? (
+                      <div className="px-3 py-3 text-xs text-slate-500">
+                        Loading…
                       </div>
-                    ))
-                  )}
+                    ) : notifError ? (
+                      <div className="px-3 py-3 text-xs text-rose-600">
+                        {notifError}
+                      </div>
+                    ) : !notifItems.length ? (
+                      <div className="px-3 py-3 text-xs text-slate-500">
+                        No notifications yet.
+                      </div>
+                    ) : (
+                      notifItems.map((n) => (
+                        <div
+                          key={n.id}
+                          className={`px-3 py-2 text-xs border-b border-slate-50 last:border-0 ${
+                            !n.read_at ? "bg-slate-50" : ""
+                          }`}
+                        >
+                          <div className="font-semibold text-slate-700">
+                            {n.title || "Notification"}
+                          </div>
+                          {n.message && (
+                            <div className="mt-0.5 text-slate-600">
+                              {n.message}
+                            </div>
+                          )}
+                          <div className="mt-0.5 flex justify-between items-center text-[10px] text-slate-400">
+                            <span>
+                              {n.created_at
+                                ? new Date(n.created_at).toLocaleString()
+                                : ""}
+                            </span>
+                            {n.link_url && (
+                              <a
+                                href={n.link_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-sky-600 hover:underline"
+                              >
+                                View
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
-              </div>
+              </>
             )}
           </div>
 

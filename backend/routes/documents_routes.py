@@ -1,14 +1,28 @@
 # backend/routes/documents_routes.py
 import os, mimetypes, json, time, hmac, hashlib, base64
 from flask import (
-    Blueprint, request, jsonify, current_app,
-    send_from_directory, send_file, url_for, abort
+    Blueprint,
+    request,
+    jsonify,
+    current_app,
+    send_from_directory,
+    send_file,
+    url_for,
+    abort,
 )
 from werkzeug.utils import secure_filename
 from flask_login import login_required, current_user
 
 from backend.extensions import db
-from backend.models import User, Investor, Document, DocumentShare
+from backend.models import (
+    User,
+    Investor,
+    Document,
+    DocumentShare,
+    DocumentFolder,
+    DocumentFolderShare,
+)
+from sqlalchemy import or_
 
 documents_bp = Blueprint("documents", __name__)
 
@@ -16,12 +30,31 @@ documents_bp = Blueprint("documents", __name__)
 # Helpers
 # ─────────────────────────────────────────────────────────────
 def _ensure_upload_dir():
-    upload_dir = os.getenv(
-        "UPLOAD_DOCS_DIR",
-        os.path.join(current_app.root_path, "uploads", "docs"),
-    )
+    """
+    Resolve the physical directory where document files are stored.
+
+    Priority:
+      1) Environment variable UPLOAD_DOCS_DIR (if set)
+      2) Azure App Service persistent path: /home/site/data/docs
+      3) Local fallback: <app_root>/uploads/docs
+    """
+    # 1) Explicit override (works both locally and in Azure)
+    upload_dir = os.getenv("UPLOAD_DOCS_DIR")
+
+    if not upload_dir:
+        # 2) Azure App Service: /home/site/data is the persisted volume
+        azure_base = "////home/site/data"
+        if os.path.isdir(azure_base) or os.getenv("WEBSITE_SITE_NAME"):
+            upload_dir = os.path.join(azure_base, "docs")
+        else:
+            # 3) Local dev fallback
+            upload_dir = os.path.join(
+                current_app.root_path, "uploads", "docs"
+            )
+
     os.makedirs(upload_dir, exist_ok=True)
     return upload_dir
+
 
 
 def _is_admin() -> bool:
@@ -29,6 +62,18 @@ def _is_admin() -> bool:
         getattr(current_user, "is_authenticated", False)
         and str(getattr(current_user, "user_type", "")).lower() == "admin"
     )
+
+
+def _get_folder_or_404(folder_id: int):
+    folder = DocumentFolder.query.get(int(folder_id))
+    if not folder:
+        abort(404, description="Folder not found.")
+    return folder
+
+
+def _ensure_admin():
+    if not _is_admin():
+        abort(403, description="Admins only.")
 
 
 def _is_group_admin() -> bool:
@@ -129,7 +174,10 @@ def _resolve_user_ids(raw_ids):
     if remaining:
         linked = (
             Investor.query.with_entities(Investor.account_user_id)
-            .filter(Investor.id.in_(remaining), Investor.account_user_id.isnot(None))
+            .filter(
+                Investor.id.in_(remaining),
+                Investor.account_user_id.isnot(None),
+            )
             .all()
         )
         user_ids.update(int(row[0]) for row in linked if row and row[0])
@@ -183,8 +231,12 @@ def _serialize(doc: Document):
                 "shared_at": s.shared_at.isoformat(),
                 "label": meta.get("label"),
                 "email": meta.get("email"),
+                # NEW: document vs statement
+                "share_type": getattr(s, "share_type", "document"),
             }
         )
+
+    folder = getattr(doc, "folder", None)
     return {
         "id": doc.id,
         "title": doc.title,
@@ -193,7 +245,25 @@ def _serialize(doc: Document):
         "size_bytes": doc.size_bytes,
         "uploaded_at": doc.uploaded_at.isoformat(),
         "shares": shares,
+        "folder_id": doc.folder_id,
+        "folder_name": folder.name if folder else None,
     }
+
+
+def _serialize_folder(folder: DocumentFolder, include_doc_count: bool = False):
+    data = {
+        "id": folder.id,
+        "name": folder.name,
+        # new: parent_id for nested folders (use getattr so it won't crash
+        # if the column is temporarily missing)
+        "parent_id": getattr(folder, "parent_id", None),
+        "created_at": folder.created_at.isoformat()
+        if getattr(folder, "created_at", None)
+        else None,
+    }
+    if include_doc_count:
+        data["doc_count"] = len(folder.documents or [])
+    return data
 
 
 def _unique_filename(directory: str, requested_name: str) -> str:
@@ -363,6 +433,173 @@ def share_options():
     return jsonify(ok=True, options=options)
 
 # ─────────────────────────────────────────────────────────────
+# Folders
+# ─────────────────────────────────────────────────────────────
+@documents_bp.get("/api/document-folders")
+@login_required
+def list_document_folders():
+    """
+    List folders for both admins and investors.
+
+    - Admins: see all folders; when include_counts=1, doc_count is the total
+      number of documents in each folder.
+
+    - Non-admins (investors / group admins): also see all folders so that
+      folder structure matches the admin’s. However, doc_count (when requested)
+      counts only the documents in that folder that are actually shared with
+      this logged-in user.
+
+    This way:
+      * Admin does NOT need to share a folder explicitly.
+      * As soon as a file in a folder is shared with an investor, it appears
+        under that same folder in the investor’s Documents view.
+    """
+    include_counts = bool(request.args.get("include_counts"))
+
+    # Everyone sees the global folder list
+    folders = DocumentFolder.query.order_by(DocumentFolder.name.asc()).all()
+
+    user_is_admin = _is_admin()
+    user_id_for_counts = None
+
+    if not user_is_admin:
+        # For investors / group-admins, we count only docs shared to them.
+        user_id_for_counts = _authed_user_id()
+
+    # If counts are not requested, just serialize and return.
+    if not include_counts:
+        return jsonify(
+            ok=True,
+            folders=[_serialize_folder(f, include_doc_count=False) for f in folders],
+        )
+
+    # We need doc_count per folder.
+    # Start with base serialization (no counts yet).
+    payload_by_id = {
+        f.id: _serialize_folder(f, include_doc_count=False) for f in folders
+    }
+
+    if user_is_admin or user_id_for_counts is None:
+        # Admin: doc_count = total number of docs in each folder.
+        for f in folders:
+            payload_by_id[f.id]["doc_count"] = len(f.documents or [])
+    else:
+        # Investor / group admin: doc_count = number of docs in this folder
+        # shared with *this* user.
+        rows = (
+            db.session.query(Document.folder_id, db.func.count(Document.id))
+            .join(DocumentShare, DocumentShare.document_id == Document.id)
+            .filter(
+                DocumentShare.investor_user_id == int(user_id_for_counts),
+                Document.folder_id.isnot(None),
+            )
+            .group_by(Document.folder_id)
+            .all()
+        )
+        counts = {folder_id: int(cnt) for folder_id, cnt in rows}
+        for f in folders:
+            payload_by_id[f.id]["doc_count"] = counts.get(f.id, 0)
+
+    return jsonify(ok=True, folders=list(payload_by_id.values()))
+
+
+@documents_bp.post("/api/document-folders")
+@login_required
+def create_document_folder():
+    """Create a new folder (optionally inside a parent folder)."""
+    if not _is_admin():
+        return jsonify(error="Admins only."), 403
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify(error="Folder name is required."), 400
+
+    # Optional parent folder (for nested structure)
+    parent_id_raw = data.get("parent_id", None)
+    parent = None
+    if parent_id_raw not in (None, "", 0, "0"):
+        try:
+            parent_id = int(parent_id_raw)
+        except (TypeError, ValueError):
+            return jsonify(error="parent_id must be an integer or null."), 400
+        parent = DocumentFolder.query.get(parent_id)
+        if not parent:
+            return jsonify(error="Parent folder not found."), 404
+
+    folder = DocumentFolder(
+        name=name,
+        parent_id=parent.id if parent is not None else None,
+        created_by_user_id=int(_authed_user_id() or 0),
+    )
+    db.session.add(folder)
+    db.session.commit()
+    return jsonify(ok=True, folder=_serialize_folder(folder))
+
+
+
+@documents_bp.post("/api/document-folders/share")
+@login_required
+def share_document_folder():
+    """
+    Share a folder with one or more investors.
+
+    This:
+      * creates DocumentFolderShare rows
+      * also ensures all existing documents in the folder have DocumentShare
+        rows for the same investors, so investors can actually see files.
+    """
+    if not _is_admin():
+        return jsonify(error="Admins only."), 403
+
+    data = request.get_json(silent=True) or {}
+    folder_id = int(data.get("folder_id") or 0)
+    raw_ids = (
+        [data["investor_id"]]
+        if data.get("investor_id")
+        else (data.get("investor_ids") or [])
+    )
+    resolved_user_ids = _resolve_user_ids(raw_ids)
+
+    if not folder_id or not resolved_user_ids:
+        return (
+            jsonify(error="folder_id and investor_id(s) are required."),
+            400,
+        )
+
+    folder = DocumentFolder.query.get(folder_id)
+    if not folder:
+        return jsonify(error="Folder not found."), 404
+
+    # 1) Folder-level shares
+    existing_folder_users = {
+        s.investor_user_id for s in (folder.shares or [])
+    }
+    for uid in resolved_user_ids:
+        if int(uid) not in existing_folder_users:
+            db.session.add(
+                DocumentFolderShare(
+                    folder_id=folder.id,
+                    investor_user_id=int(uid),
+                )
+            )
+
+    # 2) Propagate to all documents inside the folder
+    for doc in folder.documents or []:
+        existing_doc_users = {s.investor_user_id for s in (doc.shares or [])}
+        for uid in resolved_user_ids:
+            if int(uid) not in existing_doc_users:
+                db.session.add(
+                    DocumentShare(
+                        document_id=doc.id,
+                        investor_user_id=int(uid),
+                    )
+                )
+
+    db.session.commit()
+    return jsonify(ok=True)
+
+# ─────────────────────────────────────────────────────────────
 # Upload (stores using the original filename, made unique)
 # ─────────────────────────────────────────────────────────────
 @documents_bp.post("/api/documents/upload")
@@ -376,6 +613,15 @@ def upload_document():
         return jsonify(error="No file provided."), 400
 
     title = (request.form.get("title") or "").strip() or None
+
+    # Optional folder_id for this upload
+    raw_folder = (request.form.get("folder_id") or "").strip()
+    folder_id = None
+    if raw_folder:
+        try:
+            folder_id = int(raw_folder)
+        except Exception:
+            return jsonify(error="folder_id must be an integer."), 400
 
     raw_single = request.form.get("investor_id")
     raw_multi = request.form.get("investor_ids")
@@ -404,18 +650,39 @@ def upload_document():
         mime_type=mime,
         size_bytes=size,
         uploaded_by_user_id=int(_authed_user_id() or 0),
+        folder_id=folder_id,
     )
     db.session.add(doc)
     db.session.flush()
 
-    for uid in resolved_user_ids:
+    # If document is placed in a folder, also share with everyone who has
+    # access to that folder.
+    folder_share_user_ids = []
+    if folder_id:
+        folder = DocumentFolder.query.get(folder_id)
+        if folder:
+            folder_share_user_ids = [
+                s.investor_user_id for s in (folder.shares or [])
+            ]
+
+    all_share_ids = list(
+        dict.fromkeys(list(resolved_user_ids) + folder_share_user_ids)
+    )
+
+    for uid in all_share_ids:
         db.session.add(
-            DocumentShare(document_id=doc.id, investor_user_id=int(uid))
+            DocumentShare(
+                document_id=doc.id,
+                investor_user_id=int(uid),
+            )
         )
 
     db.session.commit()
     return jsonify(ok=True, document=_serialize(doc))
 
+# ─────────────────────────────────────────────────────────────
+# List documents
+# ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
 # List documents
 # ─────────────────────────────────────────────────────────────
@@ -430,10 +697,36 @@ def list_documents():
     - Group Admin:
         * without investor_id: docs shared with their own user
         * with investor_id: docs shared with that investor's user (My Group child view)
+
+    Extra:
+      - share_type=document   (default) -> normal Documents section
+      - share_type=statement           -> docs shared specifically "for statements"
     """
     user_is_admin = _is_admin()
     user_is_group_admin = _is_group_admin()
     investor_id_param = request.args.get("investor_id", type=int)
+    folder_id_param = request.args.get("folder_id", type=int)
+    share_type_param = (request.args.get("share_type") or "").strip().lower()
+
+    def _apply_folder_filter(q):
+        if folder_id_param is not None:
+            q = q.filter(Document.folder_id == folder_id_param)
+        return q
+
+    # For views that join DocumentShare (investor / group admin / admin-view-as),
+    # decide which share_type we want:
+    #   - "document" (default)  => normal Documents tab
+    #   - "statement"           => only statement-linked docs
+    def _apply_share_type_filter(q):
+        if share_type_param == "statement":
+            return q.filter(DocumentShare.share_type == "statement")
+        # default: treat as "document"
+        return q.filter(
+            or_(
+                DocumentShare.share_type == "document",
+                DocumentShare.share_type.is_(None),
+            )
+        )
 
     if user_is_admin:
         view_as_id = _view_as_investor_id() or investor_id_param
@@ -443,14 +736,18 @@ def list_documents():
                 docs = []
             else:
                 uid = int(inv.account_user_id)
-                docs = (
+                q = (
                     Document.query.join(DocumentShare)
                     .filter(DocumentShare.investor_user_id == uid)
-                    .order_by(Document.uploaded_at.desc())
-                    .all()
                 )
+                q = _apply_share_type_filter(q)
+                q = _apply_folder_filter(q)
+                docs = q.order_by(Document.uploaded_at.desc()).all()
         else:
-            docs = Document.query.order_by(Document.uploaded_at.desc()).all()
+            # Admin management view: see all documents regardless of share_type
+            q = Document.query
+            q = _apply_folder_filter(q)
+            docs = q.order_by(Document.uploaded_at.desc()).all()
 
     elif user_is_group_admin:
         if investor_id_param:
@@ -459,35 +756,39 @@ def list_documents():
                 docs = []
             else:
                 uid = int(inv.account_user_id)
-                docs = (
+                q = (
                     Document.query.join(DocumentShare)
                     .filter(DocumentShare.investor_user_id == uid)
-                    .order_by(Document.uploaded_at.desc())
-                    .all()
                 )
+                q = _apply_share_type_filter(q)
+                q = _apply_folder_filter(q)
+                docs = q.order_by(Document.uploaded_at.desc()).all()
         else:
             uid = _authed_user_id()
             if uid is None:
                 return jsonify(ok=True, documents=[])
-            docs = (
+            q = (
                 Document.query.join(DocumentShare)
                 .filter(DocumentShare.investor_user_id == uid)
-                .order_by(Document.uploaded_at.desc())
-                .all()
             )
+            q = _apply_share_type_filter(q)
+            q = _apply_folder_filter(q)
+            docs = q.order_by(Document.uploaded_at.desc()).all()
 
     else:
         uid = _authed_user_id()
         if uid is None:
             return jsonify(ok=True, documents=[])
-        docs = (
+        q = (
             Document.query.join(DocumentShare)
             .filter(DocumentShare.investor_user_id == uid)
-            .order_by(Document.uploaded_at.desc())
-            .all()
         )
+        q = _apply_share_type_filter(q)
+        q = _apply_folder_filter(q)
+        docs = q.order_by(Document.uploaded_at.desc()).all()
 
     return jsonify(ok=True, documents=[_serialize(d) for d in docs])
+
 
 # ─────────────────────────────────────────────────────────────
 # Share / Revoke
@@ -507,6 +808,12 @@ def share_document():
     )
     resolved_user_ids = _resolve_user_ids(raw_ids)
 
+    # NEW: "Document" vs "Statement" destination for investors
+    # (admin/group_admin sharing will always be treated as "document")
+    share_target = (data.get("share_target") or "document").strip().lower()
+    if share_target not in ("document", "statement"):
+        share_target = "document"
+
     if not doc_id or not resolved_user_ids:
         return (
             jsonify(error="document_id and investor_id(s) are required."),
@@ -517,14 +824,30 @@ def share_document():
     if not doc:
         return jsonify(error="Document not found."), 404
 
-    existing = {s.investor_user_id for s in doc.shares}
+    # Existing shares keyed by investor_user_id so we can update share_type
+    existing_by_user = {
+        s.investor_user_id: s
+        for s in (doc.shares or [])
+    }
+
     for uid in resolved_user_ids:
-        if int(uid) not in existing:
+        uid = int(uid)
+        share = existing_by_user.get(uid)
+        if share:
+            # already shared; just update where it should appear
+            share.share_type = share_target
+        else:
             db.session.add(
-                DocumentShare(document_id=doc.id, investor_user_id=int(uid)
-            ))
+                DocumentShare(
+                    document_id=doc.id,
+                    investor_user_id=uid,
+                    share_type=share_target,
+                )
+            )
+
     db.session.commit()
     return jsonify(ok=True, document=_serialize(doc))
+
 
 
 @documents_bp.delete("/api/documents/share")
@@ -649,3 +972,181 @@ def delete_document(doc_id: int):
     db.session.delete(doc)
     db.session.commit()
     return jsonify(ok=True)
+
+
+@documents_bp.route("/api/document-folders/<int:folder_id>", methods=["PATCH"])
+@login_required
+def rename_document_folder(folder_id):
+    """
+    Update a document folder.
+
+    Body may contain:
+      - "name": new folder name
+      - "parent_id": new parent folder id (or null / empty for top level)
+
+    Either field (or both) can be sent.
+    """
+    _ensure_admin()
+    folder = _get_folder_or_404(folder_id)
+
+    data = request.get_json(silent=True) or {}
+
+    changed = False
+
+    # ── Rename ──────────────────────────────────────────────────────────────
+    if "name" in data:
+        new_name = (data.get("name") or "").strip()
+        if not new_name:
+            return jsonify(error="Folder name is required."), 400
+
+        if new_name != folder.name:
+            # Optional uniqueness check (case-insensitive)
+            existing = (
+                DocumentFolder.query.filter(
+                    DocumentFolder.id != folder.id,
+                    db.func.lower(DocumentFolder.name) == new_name.lower(),
+                )
+                .first()
+            )
+            if existing:
+                return (
+                    jsonify(
+                        error="A folder with this name already exists."
+                    ),
+                    409,
+                )
+
+            folder.name = new_name
+            changed = True
+
+    # ── Move (change parent folder) ────────────────────────────────────────
+    if "parent_id" in data:
+        parent_raw = data.get("parent_id")
+        parent = None
+        if parent_raw not in (None, "", 0, "0"):
+            try:
+                parent_id = int(parent_raw)
+            except (TypeError, ValueError):
+                return jsonify(
+                    error="parent_id must be an integer or null."
+                ), 400
+
+            parent = DocumentFolder.query.get(parent_id)
+            if not parent:
+                return jsonify(error="Destination folder not found."), 404
+
+            # Prevent moving into itself or one of its descendants
+            cur = parent
+            while cur is not None:
+                if cur.id == folder.id:
+                    return (
+                        jsonify(
+                            error=(
+                                "Cannot move a folder inside itself or "
+                                "one of its subfolders."
+                            )
+                        ),
+                        400,
+                    )
+                # Walk up using parent_id to avoid needing an explicit relationship
+                pid = getattr(cur, "parent_id", None)
+                cur = (
+                    DocumentFolder.query.get(pid)
+                    if pid is not None
+                    else None
+                )
+        new_parent_id = parent.id if parent is not None else None
+
+        if getattr(folder, "parent_id", None) != new_parent_id:
+            folder.parent_id = new_parent_id
+            changed = True
+
+    if not changed:
+        return jsonify(error="No changes requested."), 400
+
+    db.session.commit()
+
+    return jsonify(
+        ok=True,
+        folder=_serialize_folder(folder, include_doc_count=False),
+    )
+
+
+@documents_bp.route("/api/document-folders/<int:folder_id>", methods=["DELETE"])
+@login_required
+def delete_document_folder(folder_id):
+    """
+    Delete a folder. Documents are kept, but their folder_id is set to NULL.
+    """
+    _ensure_admin()
+    folder = _get_folder_or_404(folder_id)
+
+    # Move documents out of this folder (keep files)
+    docs = Document.query.filter_by(folder_id=folder.id).all()
+    for doc in docs:
+        doc.folder_id = None
+
+    db.session.delete(folder)
+    db.session.commit()
+
+    return jsonify(ok=True)
+
+
+
+# ─────────────────────────────────────────────────────────────
+# Update document (admin only) – move to folder / change title
+# ─────────────────────────────────────────────────────────────
+@documents_bp.route("/api/documents/<int:doc_id>", methods=["PATCH"])
+@login_required
+def update_document(doc_id: int):
+    """
+    Update document metadata.
+
+    Supported fields:
+      - "folder_id": move file into a folder (or null / empty for top level)
+      - "title": optional custom title
+    """
+    if not _is_admin():
+        return jsonify(error="Admins only."), 403
+
+    doc = Document.query.get(doc_id)
+    if not doc:
+        return jsonify(error="Not found."), 404
+
+    data = request.get_json(silent=True) or {}
+    changed = False
+
+    # Change title
+    if "title" in data:
+        new_title = (data.get("title") or "").strip() or None
+        if new_title != doc.title:
+            doc.title = new_title
+            changed = True
+
+    # Move to folder
+    if "folder_id" in data:
+        folder_raw = data.get("folder_id")
+        folder = None
+        if folder_raw not in (None, "", 0, "0"):
+            try:
+                folder_id = int(folder_raw)
+            except (TypeError, ValueError):
+                return jsonify(
+                    error="folder_id must be an integer or null."
+                ), 400
+
+            folder = DocumentFolder.query.get(folder_id)
+            if not folder:
+                return jsonify(error="Destination folder not found."), 404
+
+        new_folder_id = folder.id if folder is not None else None
+        if doc.folder_id != new_folder_id:
+            doc.folder_id = new_folder_id
+            changed = True
+
+    if not changed:
+        return jsonify(error="No fields to update."), 400
+
+    db.session.commit()
+    # Re-use existing serializer
+    return jsonify(ok=True, document=_serialize(doc))

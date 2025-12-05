@@ -144,6 +144,13 @@ export default function AllAdmins() {
                 const name = (
                   u.name || `${u.first_name || ""} ${u.last_name || ""}`
                 ).trim();
+
+                // Default/fallback values:
+                const status =
+                  u.status && u.status !== "-" ? u.status : "Active";
+                const permission =
+                  u.permission && u.permission !== "-" ? u.permission : "Viewer";
+
                 return (
                   <tr
                     key={u.id || u.email}
@@ -151,8 +158,8 @@ export default function AllAdmins() {
                   >
                     <td className="px-4 py-2">{name || "-"}</td>
                     <td className="px-4 py-2">{u.email || "-"}</td>
-                    <td className="px-4 py-2">{u.status || "-"}</td>
-                    <td className="px-4 py-2">{u.permission || "-"}</td>
+                    <td className="px-4 py-2">{status}</td>
+                    <td className="px-4 py-2">{permission}</td>
                   </tr>
                 );
               })

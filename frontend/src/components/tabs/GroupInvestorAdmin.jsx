@@ -1,6 +1,14 @@
 // frontend/src/components/tabs/GroupInvestorAdmin.jsx
 import React, { useEffect, useState } from "react";
-import { Plus, X, Edit2, Trash2, UserPlus } from "lucide-react";
+import {
+  Plus,
+  X,
+  Edit2,
+  Trash2,
+  UserPlus,
+  ChevronRight,
+  ChevronDown,
+} from "lucide-react";
 
 /* ---------------- XSRF helpers (cookie-based auth) ---------------- */
 
@@ -33,7 +41,7 @@ export default function GroupInvestorAdmin() {
   const [error, setError] = useState("");
   const [loadingAdmins, setLoadingAdmins] = useState(false);
 
-  // expanded row (clicking the admin name)
+  // expanded row (clicking the arrow)
   const [expandedAdminId, setExpandedAdminId] = useState(null);
   const [membersByAdmin, setMembersByAdmin] = useState({}); // { [adminId]: members[] }
   const [loadingMembersFor, setLoadingMembersFor] = useState(null);
@@ -53,13 +61,19 @@ export default function GroupInvestorAdmin() {
   const [loadingInvestorUsers, setLoadingInvestorUsers] = useState(false);
   const [savingAdmin, setSavingAdmin] = useState(false);
 
-  // NEW: Edit Group Admin settings dialog
+  // Edit Group Admin settings dialog
   const [isEditAdminModalOpen, setIsEditAdminModalOpen] = useState(false);
   const [editAdmin, setEditAdmin] = useState(null);
   const [editStatus, setEditStatus] = useState("");
   const [editPermission, setEditPermission] = useState("");
 
-  // NEW: Confirm dialogs instead of window.alert / window.confirm
+  // ---- NEW: edit-members checkbox list state ----
+  const [editInvestors, setEditInvestors] = useState([]); // [{id,name,email}]
+  const [editSelectedIds, setEditSelectedIds] = useState([]); // current checked
+  const [editInitialMemberIds, setEditInitialMemberIds] = useState([]); // original members
+  const [editLoadingInvestors, setEditLoadingInvestors] = useState(false);
+
+  // Confirm dialogs
   const [confirmDeleteAdmin, setConfirmDeleteAdmin] = useState(null);
   const [confirmRemoveMember, setConfirmRemoveMember] = useState(null);
 
@@ -74,7 +88,6 @@ export default function GroupInvestorAdmin() {
     setLoadingAdmins(true);
     setError("");
     try {
-      // Get all users (or a large page) and filter by role === "group admin"
       const res = await xsrfFetch("/api/admin/users?per_page=500", {
         method: "GET",
       });
@@ -219,7 +232,7 @@ export default function GroupInvestorAdmin() {
   };
 
   // ---------------------------------------------------------------------------
-  // Remove investor from group (no confirm here – modal handles confirm)
+  // Remove investor from group (used by "Remove" in expanded table)
   // ---------------------------------------------------------------------------
   const handleRemoveMember = async (adminId, investorId) => {
     try {
@@ -244,7 +257,7 @@ export default function GroupInvestorAdmin() {
   };
 
   // ---------------------------------------------------------------------------
-  // Delete group admin (no confirm here – modal handles confirm)
+  // Delete group admin
   // ---------------------------------------------------------------------------
   const handleDeleteAdmin = async (adminId) => {
     try {
@@ -343,13 +356,84 @@ export default function GroupInvestorAdmin() {
   };
 
   // ---------------------------------------------------------------------------
-  // Edit Group Admin settings modal (no alert)
+  // Edit Group Admin modal (status/permission + member checkboxes)
   // ---------------------------------------------------------------------------
+  const loadInvestorsForEdit = async (adminId) => {
+    setEditLoadingInvestors(true);
+    setError("");
+    try {
+      // current members
+      const [mRes, aRes] = await Promise.all([
+        xsrfFetch(`/api/admin/group-admins/${adminId}/investors`, {
+          method: "GET",
+        }),
+        xsrfFetch(
+          `/api/admin/group-admins/${adminId}/available-investors`,
+          { method: "GET" }
+        ),
+      ]);
+
+      const mData = await mRes.json().catch(() => ({}));
+      const aData = await aRes.json().catch(() => ({}));
+
+      if (!mRes.ok || mData.ok === false) {
+        throw new Error(
+          mData.message || `Failed to load members (${mRes.status})`
+        );
+      }
+      if (!aRes.ok || aData.ok === false) {
+        throw new Error(
+          aData.message ||
+            `Failed to load available investors (${aRes.status})`
+        );
+      }
+
+      const members = mData.members || [];
+      const available = aData.investors || [];
+
+      const combined = [
+        ...members.map((m) => ({
+          id: m.investor_id,
+          name: m.name,
+          email: m.email,
+          isMember: true,
+        })),
+        ...available.map((inv) => ({
+          id: inv.id,
+          name: inv.name,
+          email: inv.email,
+          isMember: false,
+        })),
+      ];
+
+      const memberIds = members.map((m) => m.investor_id);
+
+      setEditInvestors(combined);
+      setEditSelectedIds(memberIds);
+      setEditInitialMemberIds(memberIds);
+
+      // also keep members cache up to date for expanded table
+      setMembersByAdmin((prev) => ({
+        ...prev,
+        [adminId]: members,
+      }));
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "Failed to load investors for editing");
+    } finally {
+      setEditLoadingInvestors(false);
+    }
+  };
+
   const openEditAdminModal = (admin) => {
     setEditAdmin(admin);
     setEditStatus(admin.status || "");
     setEditPermission(admin.permission || "");
     setIsEditAdminModalOpen(true);
+    setEditInvestors([]);
+    setEditSelectedIds([]);
+    setEditInitialMemberIds([]);
+    loadInvestorsForEdit(admin.id);
   };
 
   const closeEditAdminModal = () => {
@@ -357,6 +441,15 @@ export default function GroupInvestorAdmin() {
     setEditAdmin(null);
     setEditStatus("");
     setEditPermission("");
+    setEditInvestors([]);
+    setEditSelectedIds([]);
+    setEditInitialMemberIds([]);
+  };
+
+  const toggleEditInvestor = (id) => {
+    setEditSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
   };
 
   const handleSaveEditAdmin = async (e) => {
@@ -367,6 +460,7 @@ export default function GroupInvestorAdmin() {
     setError("");
 
     try {
+      // 1) Update status / permission
       const res = await xsrfFetch(
         `/api/admin/group-investor-admin/${editAdmin.id}`,
         {
@@ -393,6 +487,52 @@ export default function GroupInvestorAdmin() {
           ga.id === updatedUser.id ? { ...ga, ...updatedUser } : ga
         )
       );
+
+      // 2) Diff membership checkboxes → add / remove investors
+      const toAdd = editSelectedIds.filter(
+        (id) => !editInitialMemberIds.includes(id)
+      );
+      const toRemove = editInitialMemberIds.filter(
+        (id) => !editSelectedIds.includes(id)
+      );
+
+      if (toAdd.length) {
+        const addRes = await xsrfFetch(
+          `/api/admin/group-admins/${editAdmin.id}/investors`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ investor_ids: toAdd }),
+          }
+        );
+        const addData = await addRes.json().catch(() => ({}));
+        if (!addRes.ok || addData.ok === false) {
+          throw new Error(
+            addData.message ||
+              `Failed to add investors to group (status ${addRes.status})`
+          );
+        }
+      }
+
+      if (toRemove.length) {
+        // remove one by one
+        for (const invId of toRemove) {
+          const delRes = await xsrfFetch(
+            `/api/admin/group-admins/${editAdmin.id}/investors/${invId}`,
+            { method: "DELETE" }
+          );
+          const delData = await delRes.json().catch(() => ({}));
+          if (!delRes.ok || delData.ok === false) {
+            throw new Error(
+              delData.message ||
+                `Failed to remove investor from group (status ${delRes.status})`
+            );
+          }
+        }
+      }
+
+      // refresh members list for expanded row
+      await fetchMembersForAdmin(editAdmin.id);
 
       closeEditAdminModal();
     } catch (err) {
@@ -433,11 +573,16 @@ export default function GroupInvestorAdmin() {
         </div>
       )}
 
-      <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-4">
+      <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-4 shadow-sm">
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-gray-800">
-            Group Investor Admins
-          </h2>
+          <div>
+            <h2 className="text-base font-semibold text-gray-800">
+              Group Investor Admins
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Click the arrow on the left to view investors in each group.
+            </p>
+          </div>
           <button
             type="button"
             onClick={openAddAdminModal}
@@ -457,10 +602,11 @@ export default function GroupInvestorAdmin() {
             to create one.
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto rounded-lg border border-gray-100">
             <table className="min-w-full text-sm">
               <thead>
-                <tr className="border-b bg-gray-50 text-xs font-semibold uppercase text-gray-500">
+                <tr className="bg-gray-50 text-xs font-semibold uppercase text-gray-500">
+                  <th className="w-10 px-3 py-2" />
                   <th className="px-3 py-2 text-left">Name</th>
                   <th className="px-3 py-2 text-left">Email</th>
                   <th className="px-3 py-2 text-left">Created</th>
@@ -468,29 +614,63 @@ export default function GroupInvestorAdmin() {
                 </tr>
               </thead>
               <tbody>
-                {groupAdmins.map((admin) => {
+                {groupAdmins.map((admin, idx) => {
                   const members = membersByAdmin[admin.id] || [];
                   const isExpanded = expandedAdminId === admin.id;
+                  const rowBg = idx % 2 === 0 ? "bg-white" : "bg-gray-50";
 
                   return (
                     <React.Fragment key={admin.id}>
-                      <tr className="border-b">
-                        <td className="px-3 py-2 whitespace-nowrap">
+                      <tr className={`${rowBg} border-b border-gray-100`}>
+                        {/* expand arrow */}
+                        <td className="px-3 py-2 align-top">
                           <button
                             type="button"
                             onClick={() => toggleExpandAdmin(admin.id)}
-                            className="text-blue-600 hover:underline"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded hover:bg-gray-100 text-gray-500"
+                            aria-label={
+                              isExpanded
+                                ? "Collapse investors list"
+                                : "Expand to see investors"
+                            }
                           >
-                            {admin.name || "—"}
+                            {isExpanded ? (
+                              <ChevronDown size={16} />
+                            ) : (
+                              <ChevronRight size={16} />
+                            )}
                           </button>
                         </td>
-                        <td className="px-3 py-2 whitespace-nowrap">
+
+                        {/* admin name */}
+                        <td className="px-3 py-2 whitespace-nowrap align-middle">
+                          <div className="flex flex-col">
+                            <span className="font-medium text-gray-900">
+                              {admin.name || "—"}
+                            </span>
+                            {members.length > 0 && (
+                              <span className="mt-0.5 inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+                                {members.length} investor
+                                {members.length !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* email */}
+                        <td className="px-3 py-2 whitespace-nowrap text-gray-700 align-middle">
                           {admin.email || "—"}
                         </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-gray-500">
-                          —
+
+                        {/* created */}
+                        <td className="px-3 py-2 whitespace-nowrap text-gray-500 text-xs align-middle">
+                          {admin.created_at
+                            ? new Date(admin.created_at).toLocaleDateString()
+                            : "—"}
                         </td>
-                        <td className="px-3 py-2 whitespace-nowrap">
+
+                        {/* actions */}
+                        <td className="px-3 py-2 whitespace-nowrap align-middle">
                           <div className="flex items-center justify-end gap-2">
                             <button
                               type="button"
@@ -522,15 +702,26 @@ export default function GroupInvestorAdmin() {
                         </td>
                       </tr>
 
+                      {/* expanded investors row */}
                       {isExpanded && (
-                        <tr className="border-b bg-gray-50">
+                        <tr className="bg-gray-50 border-b border-gray-100">
+                          <td className="px-3 py-3" />
                           <td
                             className="px-3 py-3 text-sm text-gray-700"
                             colSpan={4}
                           >
-                            <div className="font-semibold mb-2">
-                              Investors in this group
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="font-semibold">
+                                Investors in this group
+                              </div>
+                              <span className="text-xs text-gray-500">
+                                {members.length}{" "}
+                                {members.length === 1
+                                  ? "investor"
+                                  : "investors"}
+                              </span>
                             </div>
+
                             {loadingMembersFor === admin.id ? (
                               <div className="text-gray-500">
                                 Loading investors...
@@ -544,36 +735,52 @@ export default function GroupInvestorAdmin() {
                                 to add one or more.
                               </div>
                             ) : (
-                              <ul className="space-y-1">
-                                {members.map((m) => (
-                                  <li
-                                    key={m.investor_id}
-                                    className="flex items-center justify-between pl-4"
-                                  >
-                                    <span className="flex items-center gap-1">
-                                      <span className="text-gray-400">↳</span>
-                                      <span>
-                                        {m.name || "—"}{" "}
-                                        <span className="text-gray-500">
-                                          ({m.email || "—"})
-                                        </span>
-                                      </span>
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        setConfirmRemoveMember({
-                                          admin,
-                                          member: m,
-                                        })
-                                      }
-                                      className="text-xs text-red-600 hover:text-red-800"
-                                    >
-                                      Remove
-                                    </button>
-                                  </li>
-                                ))}
-                              </ul>
+                              <div className="rounded-md border border-gray-200 bg-white">
+                                <table className="min-w-full text-xs">
+                                  <thead className="bg-gray-50 text-gray-500 uppercase">
+                                    <tr>
+                                      <th className="px-3 py-1 text-left">
+                                        Investor
+                                      </th>
+                                      <th className="px-3 py-1 text-left">
+                                        Email
+                                      </th>
+                                      <th className="px-3 py-1 text-right">
+                                        Actions
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {members.map((m) => (
+                                      <tr
+                                        key={m.investor_id}
+                                        className="border-t border-gray-100"
+                                      >
+                                        <td className="px-3 py-1.5">
+                                          {m.name || "—"}
+                                        </td>
+                                        <td className="px-3 py-1.5 text-gray-600">
+                                          {m.email || "—"}
+                                        </td>
+                                        <td className="px-3 py-1.5 text-right">
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setConfirmRemoveMember({
+                                                admin,
+                                                member: m,
+                                              })
+                                            }
+                                            className="text-xs text-red-600 hover:text-red-800"
+                                          >
+                                            Remove
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -736,10 +943,10 @@ export default function GroupInvestorAdmin() {
         </div>
       )}
 
-      {/* Edit Group Investor Admin Modal (no alert) */}
+      {/* Edit Group Investor Admin Modal (with member checkboxes) */}
       {isEditAdminModalOpen && editAdmin && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30">
-          <div className="bg-white rounded-lg shadow-lg w-full max-w-md">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-lg">
             <div className="flex items-center justify-between border-b px-4 py-3">
               <h3 className="text-sm font-semibold">
                 Edit Group Investor Admin
@@ -754,7 +961,7 @@ export default function GroupInvestorAdmin() {
             </div>
 
             <form onSubmit={handleSaveEditAdmin}>
-              <div className="px-4 py-3 space-y-3 text-sm">
+              <div className="px-4 py-3 space-y-4 text-sm">
                 <div>
                   <div className="text-xs font-medium text-gray-500 mb-1">
                     Name
@@ -773,30 +980,86 @@ export default function GroupInvestorAdmin() {
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">
-                    Status
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    value={editStatus}
-                    onChange={(e) => setEditStatus(e.target.value)}
-                    placeholder="e.g. Active, Inactive"
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Status
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      value={editStatus}
+                      onChange={(e) => setEditStatus(e.target.value)}
+                      placeholder="e.g. Active, Inactive"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Permission
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      value={editPermission}
+                      onChange={(e) => setEditPermission(e.target.value)}
+                      placeholder="e.g. Viewer, Editor, Owner"
+                    />
+                  </div>
                 </div>
 
+                {/* NEW: member checkbox list */}
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">
-                    Permission
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    value={editPermission}
-                    onChange={(e) => setEditPermission(e.target.value)}
-                    placeholder="e.g. Viewer, Editor, Owner"
-                  />
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-gray-600">
+                      Group investors
+                    </span>
+                    <span className="text-[11px] text-gray-500">
+                      Checked investors belong to this group.
+                    </span>
+                  </div>
+
+                  {editLoadingInvestors ? (
+                    <div className="text-sm text-gray-500">
+                      Loading investors...
+                    </div>
+                  ) : editInvestors.length === 0 ? (
+                    <div className="text-sm text-gray-500">
+                      No eligible investors found.
+                    </div>
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto space-y-1 mt-1">
+                      {editInvestors.map((inv) => (
+                        <label
+                          key={inv.id}
+                          className="flex items-center gap-2 rounded-md border border-gray-200 px-3 py-1.5 text-sm hover:bg-gray-50"
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4"
+                            checked={editSelectedIds.includes(inv.id)}
+                            onChange={() => toggleEditInvestor(inv.id)}
+                          />
+                          <span>
+                            {inv.name || "—"}{" "}
+                            <span className="text-gray-500">
+                              ({inv.email || "—"})
+                            </span>
+                            {editInitialMemberIds.includes(inv.id) && (
+                              <span className="ml-1 text-[10px] text-green-600">
+                                current
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  <p className="mt-1 text-[11px] text-gray-500">
+                    Unchecking an investor will remove them from this group when
+                    you save.
+                  </p>
                 </div>
               </div>
 
@@ -813,7 +1076,7 @@ export default function GroupInvestorAdmin() {
                   disabled={savingAdmin}
                   className="inline-flex items-center rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {savingAdmin ? "Saving..." : "Save"}
+                  {savingAdmin ? "Saving..." : "Save changes"}
                 </button>
               </div>
             </form>
@@ -836,9 +1099,7 @@ export default function GroupInvestorAdmin() {
               </button>
             </div>
             <div className="px-4 py-3 text-sm text-gray-700 space-y-2">
-              <p>
-                Are you sure you want to delete this Group Investor Admin?
-              </p>
+              <p>Are you sure you want to delete this Group Investor Admin?</p>
               <p className="font-medium">
                 {confirmDeleteAdmin.name || confirmDeleteAdmin.email}
               </p>
@@ -871,7 +1132,7 @@ export default function GroupInvestorAdmin() {
         </div>
       )}
 
-      {/* Confirm Remove Member Modal */}
+      {/* Confirm Remove Member Modal (from expanded table) */}
       {confirmRemoveMember && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30">
           <div className="bg-white rounded-lg shadow-lg w-full max-w-sm">

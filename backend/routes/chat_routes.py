@@ -36,6 +36,7 @@ from backend.models import (
     User as AppUser,
     Notification,
     AdminMessage,  # <-- NEW: mailbox table
+    AdminPeriodBalance,  # <-- NEW: fund-level balance table
 )
 
 # ---------------- Snapshot models (string investor fields) ----------------
@@ -238,6 +239,9 @@ def _get_pending_investor_email_state(tenant: str, conversation_id: str) -> Opti
     return None
 
 
+
+
+
 def _send_investor_emails(
     subject: str,
     body: str,
@@ -397,6 +401,24 @@ def _create_dependent_request_notification(
         _dprint("Error creating dependent_request Notification:", exc)
         db.session.rollback()
 
+
+def _get_pending_file_identity_state(
+    tenant: str,
+    conversation_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Look at the latest assistant turn to see if we are currently waiting for
+    an investor identity to complete a file/statement request.
+    """
+    turns = _load_recent_turns(tenant, conversation_id, max_turns=5)
+    for entry in reversed(turns):
+        if entry.get("role") != "assistant":
+            continue
+        meta = entry.get("meta") or {}
+        state = meta.get("file_identity")
+        # Only the most recent assistant response matters
+        return state
+    return None
 
 
 def _get_pending_dependent_request_state(
@@ -1035,21 +1057,31 @@ def handle_dependent_request_intent(
     conversation_id: str,
 ) -> Dict[str, Any]:
     """
-    Multi-step flow for investors to request creation/linking of a 'Depends'
+    Multi-step flow for investors to create/link a 'Depends'
     (dependent / child) investor account via the chatbot.
 
-    Flow:
-      1) Investor: "I want to create a dependent account" → ask for name+email.
-      2) Investor gives details → chatbot checks whether the email already exists.
-         - If exists: email admin to approve linking as dependent.
-         - If not:   email admin to create a new dependent investor and send invite.
-      3) In both cases, a Notification row is created and visible to admin.
+    New behavior:
+
+      • If the email does NOT exist yet:
+          → create a new Investor row with investor_type="Depends"
+            and parent_investor_id pointing to the requesting investor.
+      • If the email already exists on an Investor/User:
+          → DO NOT auto-link (security), just notify/email the admin
+            so they can review and link manually.
+
+    Stages:
+      1) start          → ask for dependent name + email
+      2) await_details  → parse/validate name + email, then either:
+                          - create new dependent Investor, or
+                          - send admin request for existing account
+      3) done / error   → final messages
     """
 
+    # Load any prior state for this conversation
     state = _get_pending_dependent_request_state(tenant, conversation_id) or {}
     stage = state.get("stage") or "start"
 
-    # Resolve which investor is making the request (works with investor_id from frontend)
+    # Figure out which Investor this user represents
     parent_inv = _resolve_investor_for_request(user, body)
     if not parent_inv:
         ctx = {"ok": False, "issue": "no_investor_identity"}
@@ -1065,25 +1097,16 @@ def handle_dependent_request_intent(
     # ---------------- 1) First time: ask for dependent's name + email ----------------
     if stage == "start":
         answer = (
-            f"{_prefix()}sure, I can help you request a dependent (child) account. "
+            f"{_prefix()}sure, I can help you create a dependent (child) account. "
             "Please provide the dependent investor’s full name and email address, "
             "for example: 'Jane Doe, jane@example.com'."
         )
-        ctx = {
-            "ok": True,
+        new_state = {
             "stage": "await_details",
-            "parent_investor": {
-                "id": parent_inv.id,
-                "name": parent_inv.name,
-                "email": parent_email,
-            },
+            "parent_investor_id": parent_inv.id,
         }
-        meta = {
-            "dependent_request": {
-                "stage": "await_details",
-                "parent_investor_id": parent_inv.id,
-            }
-        }
+        ctx = {"dependent_request": new_state}
+        meta = {"dependent_request": new_state}
         return {"answer": answer, "context": ctx, "meta": meta}
 
     # ---------------- 2) Waiting for dependent details (name/email) ------------------
@@ -1094,101 +1117,79 @@ def handle_dependent_request_intent(
         dep_name = state.get("name") or ""
         dep_email = state.get("email") or ""
 
-        # Try to extract an email address from this message
+        # Extract an email address from this message
         email_match = re.search(
-            r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", msg
+            r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
+            msg,
         )
-
         if email_match:
             dep_email = email_match.group(1).strip()
-        elif "@" in msg:
-            # very simple fallback: treat the whole message (first token)
-            # as an email if it contains '@'
-            dep_email = msg.split()[0].strip(" ,;")
 
-        # Try to extract a name from the part before the email, or the whole message
+        # Try to extract a name from text before the email
         if not dep_name:
-            before_email = msg[: email_match.start()] if email_match else msg
-            mname = re.search(
-                r"(name is|named)\\s+(.+)", before_email, flags=re.IGNORECASE
+            if email_match:
+                before_email = msg[: email_match.start()]
+            else:
+                before_email = msg
+            raw_name = before_email.strip(" ,.-")
+            dep_name = raw_name or dep_name
+
+        # Fallback: if still no name, use the local part of email
+        if dep_email and not dep_name:
+            dep_name = dep_email.split("@", 1)[0]
+
+        # Basic validation
+        if not dep_email:
+            new_state = {
+                "stage": "await_details",
+                "parent_investor_id": parent_inv.id,
+                "name": dep_name,
+            }
+            answer = (
+                f"{_prefix()}I couldn't find a valid email address in your message. "
+                "Please send the dependent’s name and email, for example:\n\n"
+                "`John Doe, john@example.com`"
             )
-            raw_name = mname.group(2) if mname else before_email
-            dep_name = raw_name.strip(" ,.-")
+            ctx = {"dependent_request": new_state}
+            meta = {"dependent_request": new_state}
+            return {"answer": answer, "context": ctx, "meta": meta}
 
         # Prevent using the same email as the parent investor
         if dep_email and parent_email and dep_email.lower() == parent_email.lower():
+            new_state = {
+                "stage": "await_details",
+                "parent_investor_id": parent_inv.id,
+                "name": dep_name,
+            }
             answer = (
                 f"{_prefix()}the dependent’s email can’t be the same as your own. "
                 "Please provide a different email address for the dependent investor."
             )
-            new_state = {
-                "stage": "await_details",
-                "parent_investor_id": parent_inv.id,
-                "name": dep_name,
-            }
-            ctx = {"ok": False, "stage": "await_details"}
+            ctx = {"dependent_request": new_state}
             meta = {"dependent_request": new_state}
             return {"answer": answer, "context": ctx, "meta": meta}
 
-        # If we still don't have an email, ask explicitly
-        if not dep_email:
-            answer = (
-                f"{_prefix()}got it. Now please share the dependent investor’s "
-                "email address."
-            )
-            new_state = {
-                "stage": "await_details",
-                "parent_investor_id": parent_inv.id,
-                "name": dep_name,
-            }
-            ctx = {"ok": False, "stage": "await_details"}
-            meta = {"dependent_request": new_state}
-            return {"answer": answer, "context": ctx, "meta": meta}
+        # Check for existing investor/user with this email
+        existing_inv = Investor.query.filter(
+            Investor.email == dep_email
+        ).first()
+        existing_user = AppUser.query.filter(
+            AppUser.email == dep_email
+        ).first()
+        account_exists = bool(existing_inv or existing_user)
 
-        # If we still don't have a name, ask explicitly
-        if not dep_name:
-            answer = (
-                f"{_prefix()}thanks. Please also tell me the dependent investor’s "
-                "full name."
-            )
-            new_state = {
-                "stage": "await_details",
-                "parent_investor_id": parent_inv.id,
-                "email": dep_email,
-            }
-            ctx = {"ok": False, "stage": "await_details"}
-            meta = {"dependent_request": new_state}
-            return {"answer": answer, "context": ctx, "meta": meta}
-
-        # ---------------- 3) We have both name and email: check if account exists ----
-        dep_email_lower = dep_email.lower()
-        existing_user = None
-        existing_inv = None
-        try:
-            existing_user = (
-                AppUser.query.filter(AppUser.email.ilike(dep_email_lower)).first()
-            )
-        except Exception:
-            existing_user = None
-        try:
-            existing_inv = (
-                Investor.query.filter(Investor.email.ilike(dep_email_lower)).first()
-            )
-        except Exception:
-            existing_inv = None
-
-        account_exists = bool(existing_user or existing_inv)
-
-        # Build admin email text
+        # ---------- CASE A: existing account → admin must link manually ----------
         if account_exists:
-            subject = f"Dependent account link request for {dep_name} ({dep_email})"
+            display_name = (
+                parent_inv.name
+                or parent_inv.company_name
+                or f"Investor #{parent_inv.id}"
+            )
+
+            subject = "Dependent investor request via chatbot"
             lines = [
-                "An investor has requested to link an existing account as a dependent.",
-                "",
-                "Parent investor:",
-                f"- Investor ID: {parent_inv.id}",
-                f"- Name: {parent_inv.name}",
-                f"- Email: {parent_email}",
+                f"Investor {display_name} (investor.id={parent_inv.id}) "
+                "requested to add a dependent investor via the chatbot.",
                 "",
                 "Requested dependent:",
                 f"- Name: {dep_name}",
@@ -1198,111 +1199,145 @@ def handle_dependent_request_intent(
             ]
             if existing_inv:
                 lines.append(
-                    f"- Investor record: id={existing_inv.id}, name={existing_inv.name}"
+                    f"- Investor record: id={existing_inv.id}, "
+                    f"name={existing_inv.name}"
                 )
             if existing_user:
                 lines.append(
-                    f"- User record: id={existing_user.id}, email={existing_user.email}"
+                    f"- User record: id={existing_user.id}, "
+                    f"email={existing_user.email}"
                 )
-            if not existing_inv and not existing_user:
-                lines.append("- (Detected as existing by email lookup, but no details)")
 
-            lines.extend(
-                [
-                    "",
-                    "Admin action:",
-                    f"- If you approve, please link this account as a dependent "
-                    f"of investor_id={parent_inv.id} (e.g. investor_type='Depends' "
-                    "and parent_investor_id set appropriately).",
-                    "- If you reject, no changes are required.",
-                ]
+            body_text = "\n".join(lines)
+            sent = _send_admin_email(subject, body_text, user)
+
+            # Create notification for admin & parent
+            _create_dependent_request_notification(
+                parent_inv=parent_inv,
+                dep_name=dep_name,
+                dep_email=dep_email,
+                account_exists=True,
             )
-        else:
-            subject = f"New dependent investor creation request for {dep_name} ({dep_email})"
+
+            if sent:
+                answer = (
+                    f"{_prefix()}thanks, I’ve forwarded your dependent request to the admin. "
+                    "Because that email already exists in the system, an administrator "
+                    "will review it and link it as a dependent if appropriate."
+                )
+            else:
+                answer = (
+                    f"{_prefix()}I recorded your request, but something went wrong while "
+                    "sending the email to the admin. The admin can still see your request "
+                    "in their notifications, but you may also want to contact them directly."
+                )
+
+            new_state = {
+                "stage": "done",
+                "parent_investor_id": parent_inv.id,
+                "name": dep_name,
+                "email": dep_email,
+                "account_exists": True,
+                "existing_investor_id": existing_inv.id if existing_inv else None,
+                "existing_user_id": existing_user.id if existing_user else None,
+            }
+            ctx = {"dependent_request": new_state}
+            meta = {"dependent_request": new_state}
+            return {"answer": answer, "context": ctx, "meta": meta}
+
+        # ---------- CASE B: NEW dependent → create Investor(Depends) now ----------
+        try:
+            new_inv = Investor(
+                name=dep_name or dep_email,
+                owner_id=parent_inv.owner_id,
+                investor_type="Depends",           # <-- IMPORTANT
+                parent_investor_id=parent_inv.id,  # <-- parent = requester
+                parent_relationship=None,          # could be collected in a later step
+                email=dep_email,
+            )
+            db.session.add(new_inv)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            _dprint("Error creating dependent Investor via chatbot:", exc)
+            new_state = {"stage": "error"}
+            answer = (
+                f"{_prefix()}sorry, I wasn’t able to create the dependent investor record "
+                "due to a server error. Please try again later or contact support."
+            )
+            ctx = {"dependent_request": new_state}
+            meta = {"dependent_request": new_state}
+            return {"answer": answer, "context": ctx, "meta": meta}
+
+        # Create a notification for the parent/admin
+        try:
+            notif = Notification(
+                investor_id=parent_inv.id,
+                title="Dependent investor created via chatbot",
+                message=(
+                    f"A dependent investor '{dep_name}' ({dep_email}) was created "
+                    f"and linked to this account (investor.id={parent_inv.id})."
+                ),
+                kind="dependent_created",
+                link_url="/admin",
+            )
+            db.session.add(notif)
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            _dprint("Error creating dependent_created Notification:", exc)
+
+        # Optionally email the admin with details of the new dependent
+        try:
+            display_name = (
+                parent_inv.name
+                or parent_inv.company_name
+                or f"Investor #{parent_inv.id}"
+            )
+            subject = "New dependent investor created via chatbot"
             lines = [
-                "An investor has requested creation of a new dependent (child) account.",
+                f"Investor {display_name} (investor.id={parent_inv.id}) "
+                "created a dependent investor via the chatbot.",
                 "",
-                "Parent investor:",
-                f"- Investor ID: {parent_inv.id}",
-                f"- Name: {parent_inv.name}",
-                f"- Email: {parent_email}",
-                "",
-                "Requested dependent:",
+                "Dependent created:",
                 f"- Name: {dep_name}",
                 f"- Email: {dep_email}",
+                f"- New investor.id: {new_inv.id}",
                 "",
-                "Admin action:",
-                f"- If you approve, please create a new user/investor as a dependent "
-                f"of investor_id={parent_inv.id} (e.g. investor_type='Depends' and "
-                "parent_investor_id set appropriately), and send an invitation email "
-                "to the dependent’s address.",
-                "- If you reject, no changes are required.",
+                "You may want to review this record and, if appropriate, "
+                "send an invitation so they can log in.",
             ]
+            body_text = "\n".join(lines)
+            _send_admin_email(subject, body_text, user)
+        except Exception as exc:
+            _dprint("Error emailing admin about new dependent investor:", exc)
 
-        # ✅ Create Notification row so it appears in both investor & admin views
-        _create_dependent_request_notification(
-            parent_inv=parent_inv,
-            dep_name=dep_name,
-            dep_email=dep_email,
-            account_exists=account_exists,
+        # Final message to the investor
+        answer = (
+            f"{_prefix()}I’ve created a dependent investor profile for {dep_name} "
+            f"with email {dep_email} and linked it to your account. "
+            "An administrator may still review the details and send them login access if needed."
         )
-
-        body_text = "\n".join(lines)
-        sent = _send_admin_email(subject, body_text, user)
-
-        if account_exists:
-            if sent:
-                answer = (
-                    f"{_prefix()}thanks. I’ve sent a request to the fund admin to "
-                    f"link {dep_name} ({dep_email}) as a dependent account under "
-                    "your profile. They’ll review it and update the account once approved."
-                )
-            else:
-                answer = (
-                    f"{_prefix()}your request has been recorded, but I couldn’t "
-                    "send the notification email to the admin right now. "
-                    "They can still see the request in their dashboard notifications."
-                )
-        else:
-            if sent:
-                answer = (
-                    f"{_prefix()}thanks. I’ve sent a request to the fund admin to "
-                    f"create a new dependent account for {dep_name} ({dep_email}). "
-                    "Once they approve it, an invitation email will be sent to that "
-                    "address."
-                )
-            else:
-                answer = (
-                    f"{_prefix()}your request has been recorded, but I couldn’t "
-                    "send the notification email to the admin right now. "
-                    "They can still see the request in their dashboard notifications."
-                )
-
-        ctx = {
-            "ok": True,
+        new_state = {
             "stage": "done",
-            "parent_investor": {"id": parent_inv.id, "name": parent_inv.name},
-            "dependent": {"name": dep_name, "email": dep_email},
-            "account_exists": account_exists,
+            "parent_investor_id": parent_inv.id,
+            "dependent_investor_id": new_inv.id,
+            "name": dep_name,
+            "email": dep_email,
+            "account_exists": False,
         }
-        meta = {
-            "dependent_request": {
-                "stage": "done",
-                "sent": bool(sent),
-                "account_exists": account_exists,
-                "parent_investor_id": parent_inv.id,
-                "dependent": {"name": dep_name, "email": dep_email},
-            }
-        }
+        ctx = {"dependent_request": new_state}
+        meta = {"dependent_request": new_state}
         return {"answer": answer, "context": ctx, "meta": meta}
 
-    # Fallback (should not happen often)
+    # ---------------- Fallback: unknown stage → reset the flow ----------------
+    reset_state = {"stage": "start"}
+    ctx = {"dependent_request": reset_state}
     answer = (
-        f"{_prefix()}something went wrong with the dependent account request flow. "
-        "Please say again that you want to create a dependent account."
+        f"{_prefix()}let’s start over. Please tell me that you’d like to "
+        "create a dependent account, and I’ll ask for the necessary details."
     )
-    ctx = {"ok": False, "stage": "error"}
-    meta = {"dependent_request": {"stage": "start"}}
+    meta = {"dependent_request": reset_state}
     return {"answer": answer, "context": ctx, "meta": meta}
 
 
@@ -1352,6 +1387,85 @@ def _load_recent_turns(tenant: str, conv_id: str, max_turns: int) -> List[Dict[s
     with open(p, "r", encoding="utf-8") as f:
         lines = [json.loads(x) for x in f.readlines()]
     return lines[-max_turns:]
+
+
+def _load_admin_monthly_series() -> List[MonthRow]:
+    series: List[MonthRow] = []
+    try:
+        rows = (
+            AdminPeriodBalance.query
+            .order_by(AdminPeriodBalance.as_of_date.asc())
+            .all()
+        )
+    except Exception:
+        rows = []
+
+    for r in rows:
+        dt = _as_date(getattr(r, "as_of_date", None))
+        if not dt:
+            continue
+
+        beginning = float(getattr(r, "beginning_balance", 0.0) or 0.0)
+        ending = float(getattr(r, "ending_balance", 0.0) or 0.0)
+        additions = float(getattr(r, "additions", 0.0) or 0.0)
+        withdrawals = float(getattr(r, "withdrawals", 0.0) or 0.0)
+
+        mgmt = float(getattr(r, "management_fees", 0.0) or 0.0)
+        opex = float(getattr(r, "operating_expenses", 0.0) or 0.0)
+        alloc = float(getattr(r, "allocated_fees", 0.0) or 0.0)
+        total_fees = mgmt + opex + alloc
+
+        series.append(
+            {
+                "dt": dt,
+                "beginning": beginning,
+                "ending": ending,
+                "contributions": additions,
+                "distributions": withdrawals,
+                "fees": total_fees,
+            }
+        )
+
+    return series
+def _load_admin_monthly_series() -> List[MonthRow]:
+    series: List[MonthRow] = []
+    try:
+        rows = (
+            AdminPeriodBalance.query
+            .order_by(AdminPeriodBalance.as_of_date.asc())
+            .all()
+        )
+    except Exception:
+        rows = []
+
+    for r in rows:
+        dt = _as_date(getattr(r, "as_of_date", None))
+        if not dt:
+            continue
+
+        beginning = float(getattr(r, "beginning_balance", 0.0) or 0.0)
+        ending = float(getattr(r, "ending_balance", 0.0) or 0.0)
+        additions = float(getattr(r, "additions", 0.0) or 0.0)
+        withdrawals = float(getattr(r, "withdrawals", 0.0) or 0.0)
+
+        mgmt = float(getattr(r, "management_fees", 0.0) or 0.0)
+        opex = float(getattr(r, "operating_expenses", 0.0) or 0.0)
+        alloc = float(getattr(r, "allocated_fees", 0.0) or 0.0)
+        total_fees = mgmt + opex + alloc
+
+        series.append(
+            {
+                "dt": dt,
+                "beginning": beginning,
+                "ending": ending,
+                "contributions": additions,
+                "distributions": withdrawals,
+                "fees": total_fees,
+            }
+        )
+
+    return series
+
 
 
 
@@ -1467,13 +1581,21 @@ def _resolve_investor_for_request(user: Dict[str, Any], body: Dict[str, Any]) ->
 def _admin_pick_investor_from_text(message: str) -> Optional[Investor]:
     """
     Admin-only: try to infer an investor from the message (id/email/name fragments).
+
+    Improvements:
+      - supports "id 123"
+      - supports email
+      - direct substring match on full investor name inside the message
+      - fuzzy fallback on investor names
     """
     msg = (message or "").strip()
     if not msg:
         return None
 
+    low = msg.lower()
+
     # 1) 'id 123'
-    m = re.search(r"\bid\s+(\d+)\b", msg, flags=re.IGNORECASE)
+    m = re.search(r"\bid\s+(\d+)\b", low, flags=re.IGNORECASE)
     if m:
         try:
             inv = Investor.query.get(int(m.group(1)))
@@ -1493,24 +1615,39 @@ def _admin_pick_investor_from_text(message: str) -> Optional[Investor]:
         except Exception:
             pass
 
-    # 3) fuzzy name
+    # 3) load all investors once
     try:
         all_invs: List[Investor] = Investor.query.all()
     except Exception:
         return None
+    if not all_invs:
+        return None
 
+    # 3a) direct substring match on name
+    for inv in all_invs:
+        name = (inv.name or "").strip()
+        if name and name.lower() in low:
+            return inv
+
+    # 3b) fuzzy fallback on name
     names = [inv.name for inv in all_invs if inv.name]
     if not names:
         return None
 
-    best = difflib.get_close_matches(msg, names, n=1, cutoff=0.6)
+    best = difflib.get_close_matches(
+        low,
+        [n.lower() for n in names],
+        n=1,
+        cutoff=0.5,  # a bit more forgiving
+    )
     if not best:
         return None
-    best_name = best[0]
+    best_lower = best[0]
     for inv in all_invs:
-        if inv.name == best_name:
+        if inv.name and inv.name.lower() == best_lower:
             return inv
     return None
+
 
 # ---------------------------------------------------------------------------
 # Utility formatting helpers
@@ -1598,6 +1735,25 @@ def _score(a: str, b: str) -> float:
     fuzzy = difflib.SequenceMatcher(None, _norm_name(a), _norm_name(b)).ratio()
     return 0.6 * base + 0.4 * fuzzy
 
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    """Cosine similarity between two same-length vectors.
+
+    Returns 0.0 if vectors are empty, mismatched, or have zero norm.
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    num = 0.0
+    da = 0.0
+    db = 0.0
+    for x, y in zip(a, b):
+        num += x * y
+        da += x * x
+        db += y * y
+    denom = (da ** 0.5) * (db ** 0.5)
+    if denom <= 0:
+        return 0.0
+    return float(num / denom)
+
 def _build_download_url(doc_id: int, fname: str) -> str:
     safe_name = quote(fname or f"doc-{doc_id}.pdf")
     # Use the parameter name expected by the route: doc_id
@@ -1639,6 +1795,21 @@ def _build_document_preview_url(doc: Document) -> str:
         filename=safe_name,
         _external=True,
     )
+
+
+def _find_existing_file(path: str) -> Optional[str]:
+    """
+    Given a relative path (e.g. "statements/2024/Q2/foo.pdf"), attempt to find
+    the physical file in one of the configured UPLOAD_ROOTS.
+    """
+    if not path:
+        return None
+    for root in UPLOAD_ROOTS:
+        candidate = os.path.join(root, path)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
 
 
 def _build_statement_download_url(stmt: Statement) -> str:
@@ -1694,7 +1865,6 @@ def _extract_file_query(text: str) -> str:
     low = re.sub(r"\b(my|the|a|an|this|that|these|those|latest|last|recent)\b", "", low, flags=re.IGNORECASE)
     low = re.sub(r"\b(file|document|statement|report)s?\b", "", low, flags=re.IGNORECASE)
     low = re.sub(r"\b(show|open|view|see|download|upload|share)\b", "", low, flags=re.IGNORECASE)
-    low = re.sub(r"\b(please)\b", "", low, flags=re.IGNORECASE)
     low = re.sub(r"\s+", " ", low).strip()
     return low
 
@@ -1929,20 +2099,73 @@ def _which_balance_kind(message: str) -> str:
 # -----------------------------------------------------------------------------
 def handle_balance_intent(user: Dict[str, Any], message: str, body: Dict[str, Any]) -> Dict[str, Any]:
     inv = _resolve_investor_for_request(user, body)
+    is_admin = _user_is_admin(user)
 
-    # Admins can target an investor by id/email/name in the message.
-    is_admin = str(user.get("user_type", "")).lower() == "admin"
+    # Admin can target a specific investor in the text
     if is_admin:
         pick = _admin_pick_investor_from_text(message)
         if pick:
             inv = pick
 
+    # -------- ADMIN FUND-LEVEL MODE (no investor picked) --------
+    if is_admin and not inv:
+        series = _load_admin_monthly_series()
+        if not series:
+            ctx = {"ok": False, "reason": "no_admin_series"}
+            sys = (
+                "Explain that there is currently no total fund/admin balance "
+                "data available in the system."
+            )
+            return {"answer": _ask_llm(sys, ctx, message), "context": ctx}
+
+        kind = _which_balance_kind(message)  # "ending" (current) or "beginning"
+        target = _extract_target_date(message)
+        row = _pick_row(series, target)
+        idx = series.index(row)
+        prev = series[idx - 1] if idx > 0 else None
+
+        val = row["ending"] if kind == "ending" else row["beginning"]
+        label = "current" if kind == "ending" else "beginning"
+        month = _month_label(row["dt"])
+
+        answer = f"{_prefix()}as of {month}, the total fund {label} balance is {_fmt_money(val)}"
+
+        if kind == "ending" and prev:
+            chg = (row["ending"] or 0.0) - (prev["ending"] or 0.0)
+            base = prev["ending"] or 0.0
+            if base:
+                pct = (chg / max(EPS, base)) * 100.0
+                sign = "up" if chg >= 0 else "down"
+                answer += (
+                    f" — {sign} {_fmt_money(abs(chg))} "
+                    f"({_fmt_pct(abs(pct))}) vs {_month_label(prev['dt'])}."
+                )
+            else:
+                answer += (
+                    f" — change of {_fmt_money(chg)} vs {_month_label(prev['dt'])}."
+                )
+        else:
+            answer += "."
+
+        ctx = {
+            "ok": True,
+            "mode": "admin_fund",
+            "period": row["dt"].isoformat(),
+            "kind": kind,
+            "value": val,
+        }
+        return {"answer": answer, "context": ctx}
+    # -------- END ADMIN FUND-LEVEL MODE --------
+
+    # ----- normal investor flow (unchanged) -----
     if not inv:
         ctx = {"ok": False, "issue": "no_investor_identity"}
-        sys = "Investor identity could not be determined. Ask the user to reload the dashboard."
+        sys = (
+            "Investor identity could not be determined. Ask the user to reload "
+            "the dashboard."
+        )
         return {"answer": _ask_llm(sys, ctx, message), "context": ctx}
 
-    # First, try snapshot tables; if empty, fall back to Statement data.
     series = _load_monthly_series_for_investor(inv.name)
     if not series:
         series = _load_monthly_series_from_statements(inv.id)
@@ -1955,7 +2178,7 @@ def handle_balance_intent(user: Dict[str, Any], message: str, body: Dict[str, An
         sys = "Explain that there is no balance data available for this investor."
         return {"answer": _ask_llm(sys, ctx, message), "context": ctx}
 
-    kind = _which_balance_kind(message)  # 'ending' (== current) or 'beginning' (== initial)
+    kind = _which_balance_kind(message)
     target = _extract_target_date(message)
     row = _pick_row(series, target)
     idx = series.index(row)
@@ -1966,20 +2189,20 @@ def handle_balance_intent(user: Dict[str, Any], message: str, body: Dict[str, An
     month = _month_label(row["dt"])
     answer = f"{_prefix()}as of {month}, your {label} balance is {_fmt_money(val)}"
 
-    # Add MoM delta for current balance when possible
     if kind == "ending" and prev:
         chg = (row["ending"] or 0.0) - (prev["ending"] or 0.0)
-        pct = (
-            (chg / max(EPS, (prev["ending"] or 0.0))) * 100.0
-            if (prev["ending"] or 0.0)
-            else None
-        )
-        sign = "up" if chg >= 0 else "down"
-        prev_label = _month_label(prev["dt"])
-        if pct is not None and math.isfinite(pct):
-            answer += f" — {sign} {_fmt_money(abs(chg))} ({_fmt_pct(abs(pct))}) vs {prev_label}."
+        base = prev["ending"] or 0.0
+        if base:
+            pct = (chg / max(EPS, base)) * 100.0
+            sign = "up" if chg >= 0 else "down"
+            answer += (
+                f" — {sign} {_fmt_money(abs(chg))} "
+                f"({_fmt_pct(abs(pct))}) vs {_month_label(prev['dt'])}."
+            )
         else:
-            answer += f" — {sign} {_fmt_money(abs(chg))} vs {prev_label}."
+            answer += (
+                f" — change of {_fmt_money(chg)} vs {_month_label(prev['dt'])}."
+            )
     else:
         answer += "."
 
@@ -1991,6 +2214,8 @@ def handle_balance_intent(user: Dict[str, Any], message: str, body: Dict[str, An
         "value": val,
     }
     return {"answer": answer, "context": ctx}
+
+
 
 
 def _build_statement_matches(
@@ -2056,16 +2281,22 @@ def _build_statement_matches(
 # -----------------------------------------------------------------------------
 def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    File search now does TWO things:
+    File search does TWO things:
 
-    1) Pulls all documents shared with this investor (DocumentShare).
-    2) Pulls all Statement rows for this investor (their quarterly PDFs).
+    1) Pulls documents shared with an investor (DocumentShare).
+       - For normal investors: their own shared docs.
+       - For admins: docs shared with whichever investor they reference
+         (by id / name / email) or pass via body["investor_id"].
 
-    Then it ranks ALL candidates together and picks the best match.
+    2) Pulls Statement rows for that investor (their quarterly PDFs).
 
-    This version is quarter-aware: queries like "2024 Q3 statement"
-    will prefer the September-2024 statement, and follow-up summary
-    requests will target that statement.
+    Then it ranks ALL candidates together and picks the best match, using:
+    - keyword overlap & fuzzy matching, plus
+    - semantic similarity with OpenAI embeddings (cosine similarity).
+
+    This version is admin-aware: queries like
+      "show John Doe's Q3 2024 statement"
+    will pull John Doe's statements + shared docs, not the admin's.
     """
 
     # Small local helper: parse "Q3 2024" / "2024 Q3" → (year, quarter)
@@ -2080,9 +2311,40 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
             return int(m.group(1)), int(m.group(2))
         return None
 
-    # ----- 1. Shared documents (like before) -----
-    target_uid = _resolve_user_id_from_profile(user)
+    is_admin = _user_is_admin(user)
 
+    # ------------------------------------------------------------------
+    # 1. Resolve target investor (for statements AND, for admins, docs)
+    # ------------------------------------------------------------------
+    inv = _resolve_investor_for_request(user, body)
+
+    # Admins can also specify investor in free text:
+    #  - "John Doe's statement"
+    #  - "statement for id 12"
+    if is_admin:
+        pick = _admin_pick_investor_from_text(message)
+        if pick:
+            inv = pick
+
+    # ------------------------------------------------------------------
+    # 2. Resolve target user id whose shared docs we should see
+    # ------------------------------------------------------------------
+    # For admins:
+    #   - if we resolved an Investor, try account_user_id, then user_id
+    # For normal investors:
+    #   - use the logged-in user's own AppUser.id
+    target_uid: Optional[int] = None
+
+    if is_admin and inv:
+        target_uid = (
+            getattr(inv, "account_user_id", None)
+            or getattr(inv, "user_id", None)
+        )
+    else:
+        target_uid = _resolve_user_id_from_profile(user)
+
+
+    # ----- 2a. Shared documents for that user (if any) -----
     docs: List[Document] = []
     if target_uid:
         try:
@@ -2090,14 +2352,9 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
         except Exception:
             docs = []
 
-    # ----- 2. Statements for this investor -----
-    inv = _resolve_investor_for_request(user, body)
-    is_admin = _user_is_admin(user)
-    if is_admin:
-        pick = _admin_pick_investor_from_text(message)
-        if pick:
-            inv = pick
-
+    # ------------------------------------------------------------------
+    # 3. Statements for this investor
+    # ------------------------------------------------------------------
     statements: List[Statement] = []
     if inv:
         try:
@@ -2112,6 +2369,24 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
 
     # If we truly have no way to see docs or statements, bail out nicely
     if not docs and not statements:
+        # Special case: admin did not specify which investor
+        if is_admin and not inv:
+            ctx = {
+                "ok": False,
+                "issue": "admin_no_investor_for_files",
+            }
+            sys = (
+                "Explain that to fetch a statement or document you need to know which "
+                "investor the admin is asking about. Ask them to provide the investor's "
+                "full name, email address, or an ID like 'id 42'."
+            )
+            answer = _ask_llm(sys, ctx, message)
+            # 👇 mark that we are now waiting for investor identity for a file
+            meta = {"file_identity": {"stage": "await_investor"}}
+            return {"answer": answer, "context": ctx, "meta": meta}
+
+
+        # Normal case: investor resolved but they simply have no files/statements
         ctx = {
             "ok": False,
             "issue": "no_files_visible",
@@ -2119,18 +2394,23 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
         }
         sys = (
             "Explain that you couldn't find any shared files or statements for this account. "
-            "Suggest reloading the dashboard or contacting support."
+            "If the user is an admin, suggest they check that the investor actually has "
+            "documents/statements uploaded. Otherwise, suggest reloading the dashboard or "
+            "contacting support."
         )
         return {"answer": _ask_llm(sys, ctx, message), "context": ctx}
 
-    # ----- 3. Rank candidates against the user's query -----
+
+    # ------------------------------------------------------------------
+    # 4. Rank candidates against the user's query (keyword / fuzzy)
+    # ------------------------------------------------------------------
     query = _extract_file_query(message)
     base_query = query or message
     matches: List[Dict[str, Any]] = []
     doc_matches: List[Dict[str, Any]] = []
     stmt_matches: List[Dict[str, Any]] = []
 
-    # 3a) Shared docs
+    # 4a) Shared docs
     if docs and base_query:
         scored_docs: List[Tuple[float, Document]] = []
         for d in docs:
@@ -2153,14 +2433,13 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
                         d.id,
                         d.original_name or d.title or f"doc-{d.id}.pdf",
                     ),
-                    "preview_url": _build_document_preview_url(d),  # 👈 NEW
+                    "preview_url": _build_document_preview_url(d),
                     "score": float(score),
                     "source": "document",
                 }
             )
 
-
-    # 3b) Statements for this investor (quarter-aware)
+    # 4b) Statements for this investor (quarter-aware)
     if statements and base_query:
         target_dt = _extract_target_date(message)
         qinfo = _extract_target_quarter_local(message)
@@ -2173,7 +2452,6 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
         quarter_stmt_matches: List[Dict[str, Any]] = []
 
         for st in statements:
-            # Label: e.g. "September 2024 statement" or similar
             when = st.period_end or st.period_start
             if not when:
                 continue
@@ -2181,13 +2459,12 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
             month_label = _month_label(when)
             title = f"{month_label} statement".strip()
 
-            # Base similarity on the title (month+year+word 'statement')
             s = _score(base_query, title) if title else 0.0
 
-            # If user gave a specific month and match is same month/year, force a decent score
+            # If user gave a specific month, boost that match
             if s <= 0 and target_dt and when:
-                if target_dt.year == when.year and target_dt.month == target_dt.month:
-                    s = 1.0  # baseline match
+                if target_dt.year == when.year and target_dt.month == when.month:
+                    s = 1.0
 
             if s <= 0:
                 continue
@@ -2196,35 +2473,92 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
                 "id": st.id,
                 "title": title or f"Statement {st.id}",
                 "download_url": _build_statement_download_url(st),
-                "preview_url": _build_statement_preview_url(st),   # 👈 NEW
+                "preview_url": _build_statement_preview_url(st),
                 "score": float(s),
                 "source": "statement",
                 "period_start": st.period_start.isoformat() if st.period_start else None,
                 "period_end": st.period_end.isoformat() if st.period_end else None,
             }
-
-
             all_stmt_matches.append(rec)
 
-            # If a specific quarter/year was requested, also record matches for that quarter
             if q_year and q_month and when.year == q_year and when.month == q_month:
                 quarter_stmt_matches.append(rec)
 
-        # If the user asked for a quarter and we found matches for that quarter,
-        # use ONLY those; otherwise fall back to all statement matches.
-        if quarter_stmt_matches:
-            stmt_matches = quarter_stmt_matches
-        else:
-            stmt_matches = all_stmt_matches
+        stmt_matches = quarter_stmt_matches or all_stmt_matches
 
-    # Combine & pick best
-    matches = sorted(doc_matches + stmt_matches, key=lambda x: x["score"], reverse=True)
+    # ------------------------------------------------------------------
+    # 5. Combine and re-rank with semantic similarity + recency
+    # ------------------------------------------------------------------
+    raw_matches: List[Dict[str, Any]] = doc_matches + stmt_matches
+
+    if raw_matches:
+        for m in raw_matches:
+            try:
+                m["score"] = float(m.get("score", 0.0))
+            except Exception:
+                m["score"] = 0.0
+
+        base_text = (query or message or "").strip()
+
+        if base_text:
+            try:
+                texts = [base_text] + [m.get("title") or "" for m in raw_matches]
+                vecs = llm.embed(texts)
+                if vecs and len(vecs) == len(texts):
+                    query_vec = vecs[0]
+                    for m, v in zip(raw_matches, vecs[1:]):
+                        m["_emb_sim"] = _cosine_sim(query_vec, v)
+                else:
+                    for m in raw_matches:
+                        m["_emb_sim"] = 0.0
+            except Exception as exc:
+                _dprint("Embedding-based file ranking failed:", exc)
+                for m in raw_matches:
+                    m["_emb_sim"] = 0.0
+        else:
+            for m in raw_matches:
+                m["_emb_sim"] = 0.0
+
+        today = date.today()
+        for m in raw_matches:
+            k = float(m.get("score", 0.0))
+            k = max(0.0, min(1.0, k))
+
+            e_raw = float(m.get("_emb_sim", 0.0))
+            e = (e_raw + 1.0) / 2.0
+            e = max(0.0, min(1.0, e))
+
+            recency = 0.0
+            pend = m.get("period_end")
+            if pend:
+                try:
+                    dt = _as_date(pend)
+                    if dt:
+                        age_days = (today - dt).days
+                        recency = max(0.0, 1.0 - age_days / 365.0) * 0.1
+                except Exception:
+                    pass
+
+            m["final_score"] = 0.4 * k + 0.5 * e + recency
+
+        matches = sorted(
+            raw_matches,
+            key=lambda x: x.get("final_score", x.get("score", 0.0)),
+            reverse=True,
+        )
+    else:
+        matches = []
+
     selected: Optional[Dict[str, Any]] = matches[0] if matches else None
 
     out_ctx = {
         "query": message,
         "matches": matches,
         "selected": selected,
+        "target_investor": {
+            "id": getattr(inv, "id", None) if inv else None,
+            "name": getattr(inv, "name", None) if inv else None,
+        },
     }
 
     sys = (
@@ -2237,9 +2571,10 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
         "Example: 'You can preview it [Preview](PREVIEW_URL) or download it "
         "[Download](DOWNLOAD_URL).'\n\n"
         "If there are no matches, clearly say that you couldn’t find a matching "
-        "shared file or statement."
+        "shared file or statement. If the user is an admin (they may say things like "
+        "'for John Doe' or 'for investor 12'), remind them to check that this "
+        "investor actually has files uploaded in the admin documents/statement sections."
     )
-
 
     answer = _ask_llm(sys, out_ctx, message)
 
@@ -2253,6 +2588,7 @@ def handle_file_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
             meta = {"selected_statement": selected}
 
     return {"answer": answer, "context": out_ctx, "meta": meta}
+
 
 # -----------------------------------------------------------------------------
 # File summarization helpers + intent
@@ -2572,15 +2908,147 @@ def _compute_irr_approx(series: List[MonthRow]) -> Optional[float]:
         return None
 
 def handle_calc_intent(user: Dict[str, Any], message: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    inv = _resolve_investor_for_request(user, body)
+    """
+    Growth / performance intent (ROI, MOIC, IRR).
 
-    # Admin can target anyone by free text
-    is_admin = str(user.get("user_type", "")).lower() == "admin"
+    Behaviour:
+      - Normal investors: use their own monthly series (snapshot tables → statements).
+      - Admins:
+          * If they reference a specific investor (name/email/id) → use that investor.
+          * Otherwise → use fund-level series from AdminPeriodBalance (same for all admins).
+    """
+    inv = _resolve_investor_for_request(user, body)
+    is_admin = _user_is_admin(user)
+
+    # Admin can target a specific investor by free text
     if is_admin:
         pick = _admin_pick_investor_from_text(message)
         if pick:
             inv = pick
 
+    # ------------------------------------------------------------------
+    # ADMIN FUND-LEVEL PERFORMANCE (no specific investor selected)
+    # ------------------------------------------------------------------
+    if is_admin and not inv:
+        series = _load_admin_monthly_series()
+        if not series:
+            ctx = {"ok": False, "reason": "no_admin_series"}
+            sys = (
+                "Explain that there is no total fund performance data available yet "
+                "for the requested period. Suggest checking that the admin performance "
+                "data has been uploaded."
+            )
+            return {"answer": _ask_llm(sys, ctx, message), "context": ctx}
+
+        # Decide which period the admin is asking about
+        target_dt = _extract_target_date(message)    # month/date if provided
+        year_hint = _extract_target_year(message)    # bare year, e.g. 2024
+        month_hint = _parse_month_from_text(message) # 'June 2024' etc.
+
+        period_label: str
+        period_start: Optional[date]
+        period_end: Optional[date]
+        begin_val: float
+        end_val: float
+        contrib_total: Optional[float] = None
+        distr_total: Optional[float] = None
+        irr_series: List[MonthRow]
+
+        # Case 1: explicit month (e.g. "June 2024 performance")
+        if month_hint:
+            row = _pick_row(series, target_dt or month_hint)
+            period_label = _month_label(row["dt"])
+            period_start = row["dt"]
+            period_end = row["dt"]
+            begin_val = row["beginning"]
+            end_val = row["ending"]
+            contrib_total = row.get("contributions")
+            distr_total = row.get("distributions")
+            irr_series = [r for r in series if r["dt"] <= row["dt"]]
+
+        # Case 2: bare year (e.g. "performance in 2024")
+        elif year_hint:
+            year_rows = [r for r in series if r["dt"].year == year_hint]
+            if not year_rows:
+                ctx = {
+                    "ok": False,
+                    "reason": "no_year_data",
+                    "year": year_hint,
+                    "mode": "admin_fund",
+                }
+                sys = (
+                    "Explain that there is no total fund performance data for the requested year "
+                    "and suggest trying a different period or the latest performance instead."
+                )
+                return {"answer": _ask_llm(sys, ctx, message), "context": ctx}
+
+            period_label = str(year_hint)
+            period_start = year_rows[0]["dt"]
+            period_end = year_rows[-1]["dt"]
+            begin_val = year_rows[0]["beginning"]
+            end_val = year_rows[-1]["ending"]
+            contrib_total = sum(_to_float(r.get("contributions")) for r in year_rows)
+            distr_total = sum(_to_float(r.get("distributions")) for r in year_rows)
+            irr_series = year_rows
+
+        # Case 3: no explicit time hint → use latest period vs inception
+        else:
+            row = series[-1]
+            period_label = _month_label(row["dt"])
+            period_start = series[0]["dt"]
+            period_end = row["dt"]
+            begin_val = row["beginning"]
+            end_val = row["ending"]
+            contrib_total = row.get("contributions")
+            distr_total = row.get("distributions")
+            irr_series = series
+
+        # ---- Compute metrics for the fund ----
+        roi = _compute_roi(begin_val, end_val, contrib_total, distr_total)
+        moic = _compute_moic(begin_val, end_val)
+        irr = _compute_irr_approx(irr_series)
+
+        ctx = {
+            "ok": True,
+            "mode": "admin_fund",
+            "period": {
+                "label": period_label,
+                "start": period_start.isoformat() if period_start else None,
+                "end": period_end.isoformat() if period_end else None,
+            },
+            "metrics": {
+                "roi_pct": roi,
+                "moic": moic,
+                "irr_pct": irr,
+                "roi_str": _fmt_pct(roi),
+                "moic_str": _fmt_x(moic),
+                "irr_str": _fmt_pct(irr),
+            },
+            "balances": {
+                "beginning_balance": begin_val,
+                "ending_balance": end_val,
+                "beginning_str": _fmt_money(begin_val),
+                "ending_str": _fmt_money(end_val),
+            },
+            "cashflows": {
+                "contributions": contrib_total,
+                "distributions": distr_total,
+            },
+            "prefix": _prefix(),
+        }
+
+        sys = (
+            "You are a professional fund reporting assistant. Using CONTEXT, explain the fund's overall "
+            "performance for the period (not a single investor). Start your answer with CONTEXT.prefix "
+            "if it is not empty. Mention ROI, MOIC, and IRR using CONTEXT.metrics.*_str and describe how "
+            "the total fund balance changed from beginning to ending. Keep it to 2–3 short sentences."
+        )
+        answer = _ask_llm(sys, ctx, message)
+        return {"answer": answer, "context": ctx}
+
+    # ------------------------------------------------------------------
+    # NORMAL / INVESTOR-SPECIFIC PERFORMANCE (existing behaviour)
+    # ------------------------------------------------------------------
     if not inv:
         ctx = {"ok": False, "issue": "no_investor_identity"}
         sys = "Explain the investor couldn't be identified and suggest reloading the dashboard."
@@ -2707,6 +3175,7 @@ def handle_calc_intent(user: Dict[str, Any], message: str, body: Dict[str, Any])
 
     answer = _ask_llm(sys, ctx, message)
     return {"answer": answer, "context": ctx}
+
 
 
 # -----------------------------------------------------------------------------
@@ -2977,8 +3446,8 @@ def detect_intent(message: str) -> Dict[str, Any]:
     ):
         return {"type": "file_summary"}
 
-    # 1) File-oriented requests
-    if re.search(r"\b(document|file|pdf|upload|download|share)\b", m):
+    # 1) File-oriented requests (now includes 'statement' and 'report')
+    if re.search(r"\b(document|file|pdf|statement|report|upload|download|share)\b", m):
         return {"type": "file_retrieval"}
 
     # 1b) Dependent / child account creation requests
@@ -3102,6 +3571,8 @@ def chat():
     pending_inv_email = _get_pending_investor_email_state(tenant, conversation_id)
     pending_dep_req = _get_pending_dependent_request_state(tenant, conversation_id)
     pending_group_req = _get_pending_group_request_state(tenant, conversation_id)
+    pending_file_identity = _get_pending_file_identity_state(tenant, conversation_id)
+
 
     msg_low = (message or "").lower()
 
@@ -3112,7 +3583,7 @@ def chat():
     itype = detected.get("type", "general")
 
     # Admin-specific override for email vs investors/admin
-    if _user_is_admin(user):
+    if _user_is_admin(user) and not pending_file_identity:
         ml = msg_low
         mentions_email = any(
             k in ml
@@ -3178,6 +3649,12 @@ def chat():
         and pending_group_req.get("stage") in {"await_members", "confirm"}
     )
 
+    file_identity_flow_active = bool(
+        pending_file_identity
+        and pending_file_identity.get("stage") == "await_investor"
+    )
+
+
     # Let active flows "win" only when the new message is ambiguous
     # (general) or explicitly the same flow type.
     if email_flow_active and itype in {"email_admin", "general"}:
@@ -3188,6 +3665,15 @@ def chat():
         itype = "dependent_request"
     elif group_flow_active and itype in {"group_request", "general"}:
         itype = "group_request"
+    elif file_identity_flow_active and itype in {
+        "file_retrieval",
+        "email_admin",
+        "email_investors",
+        "general",
+    }:
+        # We were in the middle of "which investor is this file for?"
+        # Treat this reply as part of the file-retrieval flow.
+        itype = "file_retrieval"
     # Otherwise, if the new message clearly belongs to another intent
     # (file_retrieval, balance_data, calculation_data, investment_data,
     # fee_breakdown, file_summary, general, etc.), we DO NOT override

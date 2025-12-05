@@ -357,23 +357,32 @@ def verify_sms():
 
 
 @auth_bp.post("/logout")
+@login_required
 def logout():
-    """Log out Flask-Login and clear the session + CSRF cookie, logging activity."""
-    # Capture user before clearing session
-    user = current_user if getattr(current_user, "is_authenticated", False) else None
+    """
+    Log out the current user and record a single 'logout' entry
+    in ActivityLog. Also clears the session and CSRF cookie.
+    """
+    # current_user is guaranteed by @login_required
+    user = current_user
+
+    # 1) Log the logout event BEFORE clearing the session
+    _log_activity(user, "logout")
+
+    # 2) Clear Flask-Login + session
     try:
         logout_user()
-        _log_activity(user, "logout")
     except Exception:
+        # Even if Flask-Login has an issue, we already logged the event
         pass
+
     session.clear()
 
-    if user:
-        _log_activity(user, "logout")
-
+    # 3) Return OK and clear CSRF cookie
     resp = make_response(jsonify({"ok": True}))
     _clear_csrf_cookie(resp)
     return resp, 200
+
 
 
 @auth_bp.get("/me")

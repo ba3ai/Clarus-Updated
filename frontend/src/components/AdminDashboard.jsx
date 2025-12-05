@@ -145,6 +145,7 @@ const AdminDashboard = () => {
   const [loadingGroups, setLoadingGroups] = useState(false);
 
   const notifRef = useRef(null);
+  const mailRef = useRef(null);
 
   const sumBadge = useMemo(
     () =>
@@ -287,6 +288,8 @@ const AdminDashboard = () => {
     if (notifOpen) document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [notifOpen]);
+
+
 
   const openNotifications = async () => {
     setNotifOpen((v) => !v);
@@ -606,6 +609,16 @@ const AdminDashboard = () => {
     return () => clearInterval(id);
   }, []);
 
+
+   useEffect(() => {
+    function onDoc(e) {
+      if (!mailRef.current) return;
+      if (!mailRef.current.contains(e.target)) setMailOpen(false);
+    }
+    if (mailOpen) document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [mailOpen]);
+
   // ------------------- UI -------------------
   return (
     <div className="flex min-h-screen bg-gray-50">
@@ -666,7 +679,7 @@ const AdminDashboard = () => {
                 icon={<UserPlus size={16} />}
               />
               <TabButton
-                label="All Users"
+                label="All Admins"
                 tabKey="AllAdmins"
                 icon={<Users size={16} />}
               />
@@ -1151,7 +1164,7 @@ const AdminDashboard = () => {
           </div>
 
           {/* Mailbox */}
-          <div className="relative">
+          <div className="relative" ref={mailRef}>
             <button
               onClick={() => {
                 setMailOpen((open) => {

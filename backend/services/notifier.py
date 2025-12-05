@@ -165,3 +165,56 @@ def notify_generic_user(
                 user.email,
                 e,
             )
+
+
+
+def create_investor_notification(
+    *,
+    investor_id: int,
+    kind: str,
+    title: str,
+    message: str,
+    link_url: Optional[str] = None,
+    statement_id: Optional[int] = None,
+    send_email_flag: bool = False,
+) -> Optional[Notification]:
+    """
+    Create a bell notification for a single investor (optionally also email).
+
+    - Automatically wires investor_id -> user_id (account_user_id)
+      so the InvestorDashboard bell can see it.
+    - Does NOT commit; the caller should call db.session.commit().
+    """
+    if not investor_id:
+        log.warning("create_investor_notification called with no investor_id")
+        return None
+
+    inv = db.session.get(Investor, int(investor_id))
+    if not inv:
+        log.warning(
+            "create_investor_notification: investor %s not found", investor_id
+        )
+        return None
+
+    notif = Notification(
+        user_id=inv.account_user_id,          # link to the login user if present
+        investor_id=inv.id,
+        kind=kind,
+        title=title,
+        message=message,
+        link_url=link_url,
+        statement_id=statement_id,
+        is_read=False,
+    )
+    db.session.add(notif)
+
+    if send_email_flag and getattr(inv, "email", None):
+        try:
+            send_email(inv.email, title, html=message)
+        except Exception:
+            log.exception(
+                "create_investor_notification: email send failed for investor %s",
+                inv.id,
+            )
+
+    return notif

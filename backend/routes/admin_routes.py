@@ -228,25 +228,70 @@ def add_user():
 
 
 # ✅ Get all users
+# ✅ Get all users (with optional role + pagination) – used by AllAdmins.jsx
 @admin_bp.route("/users", methods=["GET"])
 @login_required
 @admin_required
 def get_all_users():
-    users = User.query.all()
-    user_list = [
+    """
+    Returns JSON in the shape AllAdmins.jsx expects:
+
         {
-            "id": user.id,
-            "name": f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip(),
-            "email": user.email,
-            "bank": user.bank,
-            "status": user.status,
-            "permission": user.permission,
-            "user_type": user.user_type,
-            "organization": getattr(user, "organization_name", None),
+          "ok": true,
+          "data": [ ...user dicts... ],
+          "page": 1,
+          "per_page": 50,
+          "total": 12,
+          "total_pages": 1
         }
-        for user in users
-    ]
-    return jsonify(user_list), 200
+
+    Query params:
+      - role=admin        (filter by user_type)
+      - page=1            (1-based)
+      - per_page=50
+    """
+    role = (request.args.get("role") or "").strip().lower()
+    page = request.args.get("page", type=int, default=1)
+    per_page = request.args.get("per_page", type=int, default=50)
+
+    query = User.query
+
+    if role:
+        # AllAdmins.jsx calls this with ?role=admin
+        query = query.filter(User.user_type.ilike(role))
+
+    pagination = query.order_by(User.id.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+
+    items = []
+    for user in pagination.items:
+        full_name = f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip()
+        items.append(
+            {
+                "id": user.id,
+                "name": full_name or None,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "email": user.email,
+                "bank": getattr(user, "bank", None),
+                # these two are what you want to see in the table:
+                "status": getattr(user, "status", None) or "Active",
+                "permission": getattr(user, "permission", None) or "Viewer",
+                "user_type": user.user_type,
+                "organization": getattr(user, "organization_name", None),
+            }
+        )
+
+    return jsonify(
+        ok=True,
+        data=items,
+        page=page,
+        per_page=per_page,
+        total=pagination.total,
+        total_pages=pagination.pages or 1,
+    ), 200
+
 
 
 # ───────────────────── Admin Mailbox (from 2nd developer) ─────────────────────
@@ -299,3 +344,55 @@ def admin_messages_mark_read(message_id: int):
         db.session.commit()
 
     return jsonify({"msg": "Message marked as read"}), 200
+
+
+
+@admin_bp.route("/users/<int:user_id>", methods=["PATCH"])
+@login_required
+@admin_required
+def update_user(user_id: int):
+    """
+    Update basic admin/user settings (used by GroupInvestorAdmin tab).
+
+    Allows changing:
+      - status
+      - permission
+      - user_type (optional)
+    """
+    data = request.get_json(silent=True) or {}
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"msg": "User not found"}), 404
+
+    # Only update if explicitly provided
+    if "status" in data:
+        user.status = (data.get("status") or "").strip() or None
+
+    if "permission" in data:
+        user.permission = (data.get("permission") or "").strip() or None
+
+    if "user_type" in data:
+        # you can restrict this further if needed
+        new_type = (data.get("user_type") or "").strip()
+        if new_type:
+            user.user_type = new_type
+
+    db.session.add(user)
+    db.session.commit()
+
+    full_name = f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip()
+
+    return (
+        jsonify(
+            ok=True,
+            user={
+                "id": user.id,
+                "name": full_name or None,
+                "email": user.email,
+                "status": getattr(user, "status", None),
+                "permission": getattr(user, "permission", None),
+                "user_type": user.user_type,
+            },
+        ),
+        200,
+    )

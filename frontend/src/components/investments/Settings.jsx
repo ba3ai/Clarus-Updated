@@ -2,8 +2,6 @@
 import React, { useState } from "react";
 import api from "../../services/api";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "https://clarus.elpiscapital.com";
-
 export default function Settings() {
   /* ---------------------- Change password state (YOUR BASE) ---------------------- */
   const [showModal, setShowModal] = useState(false);
@@ -42,23 +40,34 @@ export default function Settings() {
     e.preventDefault();
     setError("");
     setInfo("");
+
     if (!email.trim()) {
       setError("Email is required");
       return;
     }
+
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE}/api/auth/password/code/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.msg || "Unable to send code");
-      setInfo("If this email exists, a 6-digit code has been sent.");
+
+      // IMPORTANT: use axios api instance so baseURL is consistent
+      const { data } = await api.post(
+        "/api/auth/password/code/start",
+        { email },
+        { headers: { "Content-Type": "application/json" } }
+      );
+
+      // backend returns: { ok: true, msg: "..." }
+      if (!data?.ok) throw new Error(data?.msg || "Unable to send code");
+
+      setInfo(data?.msg || "If this email exists, a 6-digit code has been sent.");
       setStep(2);
     } catch (err) {
-      setError(err.message || "Unable to send code");
+      setError(
+        err?.response?.data?.msg ||
+          err?.response?.data?.error ||
+          err?.message ||
+          "Unable to send code"
+      );
     } finally {
       setLoading(false);
     }
@@ -69,23 +78,32 @@ export default function Settings() {
     e.preventDefault();
     setError("");
     setInfo("");
+
     if (!code.trim()) {
       setError("Verification code is required");
       return;
     }
+
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE}/api/auth/password/code/verify`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.msg || "Invalid or expired code");
-      setInfo("Code verified. You can now choose a new password.");
+
+      const { data } = await api.post(
+        "/api/auth/password/code/verify",
+        { email, code },
+        { headers: { "Content-Type": "application/json" } }
+      );
+
+      if (!data?.ok) throw new Error(data?.msg || "Invalid or expired code");
+
+      setInfo(data?.msg || "Code verified. You can now choose a new password.");
       setStep(3);
     } catch (err) {
-      setError(err.message || "Invalid or expired code");
+      setError(
+        err?.response?.data?.msg ||
+          err?.response?.data?.error ||
+          err?.message ||
+          "Invalid or expired code"
+      );
     } finally {
       setLoading(false);
     }
@@ -108,25 +126,32 @@ export default function Settings() {
 
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE}/api/auth/password/code/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code, password, confirm }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j?.msg || "Unable to update password");
 
-      setInfo("Password updated. Redirecting to login…");
+      const { data } = await api.post(
+        "/api/auth/password/code/complete",
+        { email, code, password, confirm },
+        { headers: { "Content-Type": "application/json" } }
+      );
+
+      if (!data?.ok) throw new Error(data?.msg || "Unable to update password");
+
+      setInfo(data?.msg || "Password updated. Redirecting to login…");
 
       // Clear any auth tokens and redirect to login
       localStorage.removeItem("accessToken");
       localStorage.removeItem("access_token");
       localStorage.removeItem("token");
+
       setTimeout(() => {
         window.location.href = "/login";
       }, 1000);
     } catch (err) {
-      setError(err.message || "Unable to update password");
+      setError(
+        err?.response?.data?.msg ||
+          err?.response?.data?.error ||
+          err?.message ||
+          "Unable to update password"
+      );
     } finally {
       setLoading(false);
     }
